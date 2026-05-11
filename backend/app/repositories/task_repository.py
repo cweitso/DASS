@@ -62,7 +62,7 @@ class TaskRepository:
                 started_at = func.now()
             )
             # 這行咒語強迫 SQLAlchemy 放棄快取，直接重新同步
-            .execution_options(synchronize_session="evaluate")
+            .execution_options(synchronize_session="fetch")
         )
         
         result = self.db.execute(stmt)
