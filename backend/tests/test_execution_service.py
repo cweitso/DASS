@@ -58,7 +58,7 @@ def test_execution_service_http_uses_json_for_dict_body(monkeypatch):
     result = service.run(
         "http",
         {
-            "method": "post",
+            "method": "POST",
             "url": "https://example.com",
             "headers": {"X-Trace": "1"},
             "body": {"hello": "world"},

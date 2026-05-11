@@ -4,11 +4,42 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from app.models.job import Job
 from app.models.task import Task
 from app.repositories.job_repository import JobRepository
 from app.repositories.task_repository import TaskRepository
+
+
+def _make_job(**overrides) -> Job:
+    """Build a Job with sensible defaults; mutate fields via overrides.
+
+    Always supplies next_fire_at (Job.next_fire_at is NOT NULL).
+    """
+    kwargs = {
+        "name": f"job-{uuid4()}",
+        "cron_expression": "* * * * *",
+        "action_type": "http",
+        "action_config": {"method": "GET", "url": "https://example.com"},
+        "enabled": True,
+        "concurrency_policy": "allow",
+        "max_retries": 0,
+        "next_fire_at": datetime.now(UTC),
+    }
+    kwargs.update(overrides)
+    return Job(**kwargs)
+
+
+def _make_task(job_id: str, **overrides) -> Task:
+    kwargs = {
+        "job_id": job_id,
+        "status": "pending",
+        "trigger_type": "manual",
+        "retry_count": 0,
+    }
+    kwargs.update(overrides)
+    return Task(**kwargs)
 
 
 @pytest.fixture
@@ -22,190 +53,98 @@ def task_repo(db_session):
 
 
 class TestJobRepository:
-    """Tests for JobRepository CRUD operations."""
+    """Tests for JobRepository CRUD — calls repo with Job model objects per stub TODOs."""
 
     def test_create_job(self, job_repo, db_session):
-        job = job_repo.create(
-            name="test-job",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=1,
-        )
-        assert job.id is not None
-        assert job.name == "test-job"
-        assert db_session.query(Job).filter(Job.id == job.id).first() is not None
+        job = _make_job(name="test-job", max_retries=1)
+        created = job_repo.create(job)
+        assert created.id is not None
+        assert created.name == "test-job"
+        assert db_session.query(Job).filter(Job.id == created.id).first() is not None
 
-    def test_get_job(self, job_repo, db_session):
-        job = job_repo.create(
+    def test_get_job(self, job_repo):
+        job = _make_job(
             name="get-test",
             cron_expression="0 0 * * *",
             action_type="shell",
             action_config={"command": "echo hi"},
-            enabled=True,
             concurrency_policy="forbid",
-            max_retries=0,
         )
-        retrieved = job_repo.get(job.id)
+        created = job_repo.create(job)
+        retrieved = job_repo.get(created.id)
+        assert retrieved is not None
         assert retrieved.name == "get-test"
 
-    def test_list_jobs(self, job_repo, db_session):
-        job_repo.create(
-            name="job-1",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://a.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-        )
-        job_repo.create(
-            name="job-2",
-            cron_expression="*/5 * * * *",
-            action_type="http",
-            action_config={"method": "POST", "url": "https://b.com"},
-            enabled=False,
-            concurrency_policy="allow",
-            max_retries=1,
-        )
+    def test_list_jobs(self, job_repo):
+        job_repo.create(_make_job(name="job-1"))
+        job_repo.create(_make_job(name="job-2", enabled=False, max_retries=1))
         jobs = job_repo.list()
         assert len(jobs) == 2
-        assert any(j.name == "job-1" for j in jobs)
-        assert any(j.name == "job-2" for j in jobs)
+        assert {j.name for j in jobs} == {"job-1", "job-2"}
 
-    def test_update_job(self, job_repo, db_session):
-        job = job_repo.create(
-            name="old-name",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-        )
-        job_repo.update(job.id, name="new-name", enabled=False)
-        updated = job_repo.get(job.id)
-        assert updated.name == "new-name"
-        assert updated.enabled is False
+    def test_update_job(self, job_repo):
+        created = job_repo.create(_make_job(name="old-name"))
+        created.name = "new-name"
+        created.enabled = False
+        job_repo.update(created)
+        retrieved = job_repo.get(created.id)
+        assert retrieved.name == "new-name"
+        assert retrieved.enabled is False
 
-    def test_delete_job(self, job_repo, db_session):
-        job = job_repo.create(
-            name="to-delete",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-        )
-        job_id = job.id
-        job_repo.delete(job_id)
-        retrieved = job_repo.get(job_id)
-        assert retrieved is None
+    def test_delete_job(self, job_repo):
+        created = job_repo.create(_make_job(name="to-delete"))
+        job_id = created.id
+        job_repo.delete(created)
+        assert job_repo.get(job_id) is None
 
-    def test_due_jobs_returns_past_next_fire_at(self, job_repo, db_session):
+    def test_due_jobs_returns_past_next_fire_at(self, job_repo):
         now = datetime.now(UTC)
-        job = job_repo.create(
-            name="due-job",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-            next_fire_at=now - timedelta(seconds=1),
+        created = job_repo.create(
+            _make_job(name="due-job", next_fire_at=now - timedelta(seconds=1))
         )
         due = job_repo.due_jobs(now)
-        assert len(due) > 0
-        assert any(j.id == job.id for j in due)
+        assert any(j.id == created.id for j in due)
 
 
 class TestTaskRepository:
-    """Tests for TaskRepository CRUD operations."""
+    """Tests for TaskRepository CRUD — calls repo with Task model objects per stub TODOs."""
+
+    def _seed_job(self, db_session) -> Job:
+        """Insert a Job directly via session for FK setup (don't go through repo)."""
+        job = _make_job()
+        db_session.add(job)
+        db_session.commit()
+        return job
 
     def test_create_task(self, task_repo, db_session):
-        job = db_session.query(Job).first() or Job(
-            id=str(uuid4()),
-            name="parent-job",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-        )
-        if not job.id or not db_session.query(Job).filter(Job.id == job.id).first():
-            db_session.add(job)
-            db_session.commit()
-
-        task = task_repo.create(job.id, "manual")
-        assert task.id is not None
-        assert task.job_id == job.id
-        assert task.status == "pending"
+        job = self._seed_job(db_session)
+        created = task_repo.create(_make_task(job.id, trigger_type="manual"))
+        assert created.id is not None
+        assert created.job_id == job.id
+        assert created.status == "pending"
 
     def test_get_task(self, task_repo, db_session):
-        job = db_session.query(Job).first() or Job(
-            id=str(uuid4()),
-            name="parent-job",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-        )
-        if not job.id or not db_session.query(Job).filter(Job.id == job.id).first():
-            db_session.add(job)
-            db_session.commit()
-
-        task = task_repo.create(job.id, "manual")
-        retrieved = task_repo.get(task.id)
-        assert retrieved.id == task.id
+        job = self._seed_job(db_session)
+        created = task_repo.create(_make_task(job.id, trigger_type="manual"))
+        retrieved = task_repo.get(created.id)
+        assert retrieved is not None
+        assert retrieved.id == created.id
         assert retrieved.job_id == job.id
 
     def test_list_by_job(self, task_repo, db_session):
-        job = Job(
-            id=str(uuid4()),
-            name="multi-task-job",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="allow",
-            max_retries=0,
-        )
-        db_session.add(job)
-        db_session.commit()
-
-        task1 = task_repo.create(job.id, "manual")
-        task2 = task_repo.create(job.id, "scheduled")
+        job = self._seed_job(db_session)
+        t1 = task_repo.create(_make_task(job.id, trigger_type="manual"))
+        t2 = task_repo.create(_make_task(job.id, trigger_type="scheduled"))
         tasks = task_repo.list_by_job(job.id)
-        assert len(tasks) == 2
-        assert any(t.id == task1.id for t in tasks)
-        assert any(t.id == task2.id for t in tasks)
+        assert {t.id for t in tasks} == {t1.id, t2.id}
 
     def test_count_running_for_job(self, task_repo, db_session):
-        job = Job(
-            id=str(uuid4()),
-            name="count-job",
-            cron_expression="* * * * *",
-            action_type="http",
-            action_config={"method": "GET", "url": "https://example.com"},
-            enabled=True,
-            concurrency_policy="forbid",
-            max_retries=0,
-        )
-        db_session.add(job)
-        db_session.commit()
-
-        task_repo.create(job.id, "manual")
-        task = task_repo.create(job.id, "scheduled")
+        job = self._seed_job(db_session)
+        task_repo.create(_make_task(job.id, trigger_type="manual"))
+        running = task_repo.create(_make_task(job.id, trigger_type="scheduled"))
         db_session.execute(
-            f"UPDATE tasks SET status='running' WHERE id='{task.id}'"
+            text("UPDATE tasks SET status='running' WHERE id=:tid"),
+            {"tid": str(running.id)},
         )
         db_session.commit()
-
-        count = task_repo.count_running_for_job(job.id)
-        assert count == 1
+        assert task_repo.count_running_for_job(job.id) == 1
