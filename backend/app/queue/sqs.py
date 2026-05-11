@@ -9,55 +9,50 @@ from app.queue.base import QueueMessage
 
 
 class SQSQueueClient:
-    """AWS SQS Queue 實作（本地用 LocalStack）。"""
+    """AWS SQS queue client (LocalStack for local dev).
+
+    Conforms to the QueueClient Protocol structurally; no inheritance needed.
+    """
 
     def __init__(self, settings: Settings):
-        """初始化 SQS client 並取得 queue URL。
-
-        # TODO:
-        #   1. 儲存 settings
-        #   2. 建立 boto3.client('sqs', region_name=..., endpoint_url=...,
-        #      aws_access_key_id=..., aws_secret_access_key=..., aws_session_token=...)
-        #   3. 呼叫 self._resolve_queue_url() 取得 queue_url
-        """
-        raise NotImplementedError
+        self.settings = settings
+        self.client = boto3.client(
+            "sqs",
+            region_name=settings.aws_region,
+            endpoint_url=settings.sqs_endpoint_url,
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            aws_session_token=settings.aws_session_token,
+        )
+        self.queue_url = self._resolve_queue_url()
 
     def _resolve_queue_url(self) -> str:
-        """取得 SQS queue URL，若 queue 不存在則自動建立。
-
-        # TODO:
-        #   1. 嘗試 self.client.get_queue_url(QueueName=self.settings.queue_name)
-        #   2. 若 QueueDoesNotExist → self.client.create_queue(...)
-        #   3. 回傳 queue URL
-        """
-        raise NotImplementedError
+        # Look up the queue; create it on first run if missing.
+        try:
+            response = self.client.get_queue_url(QueueName=self.settings.queue_name)
+            return response["QueueUrl"]
+        except self.client.exceptions.QueueDoesNotExist:
+            response = self.client.create_queue(QueueName=self.settings.queue_name)
+            return response["QueueUrl"]
 
     def send_task(self, task_id: str) -> None:
-        """發送 task_id 到 SQS queue。
-
-        # TODO:
-        #   MessageBody = json.dumps({"task_id": task_id})
-        #   self.client.send_message(QueueUrl=..., MessageBody=...)
-        """
-        raise NotImplementedError
+        self.client.send_message(
+            QueueUrl=self.queue_url,
+            MessageBody=json.dumps({"task_id": task_id}),
+        )
 
     def receive_tasks(self, max_messages: int = 1, wait_time_seconds: int = 10) -> list[QueueMessage]:
-        """從 SQS 接收訊息（支援 long polling）。
-
-        # TODO:
-        #   1. self.client.receive_message(
-        #        QueueUrl=..., MaxNumberOfMessages=max_messages,
-        #        WaitTimeSeconds=wait_time_seconds,
-        #        VisibilityTimeout=self.settings.worker_visibility_timeout_seconds)
-        #   2. 將 response['Messages'] 轉成 QueueMessage list
-        #      - body = message['Body'], receipt_handle = message['ReceiptHandle']
-        """
-        raise NotImplementedError
+        # Long polling: SQS waits up to wait_time_seconds for a message.
+        response = self.client.receive_message(
+            QueueUrl=self.queue_url,
+            MaxNumberOfMessages=max_messages,
+            WaitTimeSeconds=wait_time_seconds,
+            VisibilityTimeout=self.settings.worker_visibility_timeout_seconds,
+        )
+        return [
+            QueueMessage(body=message["Body"], receipt_handle=message["ReceiptHandle"])
+            for message in response.get("Messages", [])
+        ]
 
     def delete_message(self, receipt_handle: str) -> None:
-        """確認消費，從 SQS 刪除已處理的訊息。
-
-        # TODO:
-        #   self.client.delete_message(QueueUrl=..., ReceiptHandle=receipt_handle)
-        """
-        raise NotImplementedError
+        self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
