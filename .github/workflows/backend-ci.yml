@@ -1,0 +1,134 @@
+name: Backend CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      repositories: ${{ steps.filter.outputs.repositories }}
+      queue: ${{ steps.filter.outputs.queue }}
+      api: ${{ steps.filter.outputs.api }}
+      execution_service: ${{ steps.filter.outputs.execution_service }}
+      scheduler: ${{ steps.filter.outputs.scheduler }}
+      worker: ${{ steps.filter.outputs.worker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            repositories:
+              - 'backend/app/repositories/**'
+              - 'backend/app/models/**'
+              - 'backend/app/db/**'
+            queue:
+              - 'backend/app/queue/**'
+            api:
+              - 'backend/app/api/**'
+              - 'backend/app/services/job_service.py'
+            execution_service:
+              - 'backend/app/services/execution_service.py'
+            scheduler:
+              - 'backend/app/services/scheduler_service.py'
+            worker:
+              - 'backend/app/services/worker_service.py'
+
+  test-repositories:
+    name: Test / Repositories (DB Layer)
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[db]') ||
+      needs.changes.outputs.repositories == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest tests/test_repositories.py -v
+
+  test-queue:
+    name: Test / Queue
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[queue]') ||
+      needs.changes.outputs.queue == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest tests/test_queue.py -v
+
+  test-api:
+    name: Test / API (Jobs CRUD & Handlers)
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[api]') ||
+      needs.changes.outputs.api == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest tests/test_api.py -v
+
+  test-execution-service:
+    name: Test / ExecutionService (HTTP & Shell)
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[worker]') ||
+      needs.changes.outputs.execution_service == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest tests/test_execution_service.py -v
+
+  test-scheduler:
+    name: Test / Scheduler (Dispatch & Orphan Recovery)
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[scheduler]') ||
+      needs.changes.outputs.scheduler == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest tests/test_scheduler.py -v
+
+  test-worker:
+    name: Test / Worker (Task Processing & Retry)
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[worker]') ||
+      needs.changes.outputs.worker == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest tests/test_worker.py -v
