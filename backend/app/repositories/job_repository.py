@@ -14,57 +14,52 @@ class JobRepository:
         self.db = db
 
     def create(self, job: Job) -> Job:
-        """將 Job 實體寫入資料庫並回傳（含 commit + refresh）。
-
-        # TODO:
-        #   1. 用 self.db.add() 加入 session
-        #   2. commit
-        #   3. refresh 以取得 DB 產生的欄位（id, created_at）
-        #   4. 回傳 job
-        """
-        raise NotImplementedError
+        # 1. 用 self.db.add() 將傳進來的 job 加入 session
+        self.db.add(job)
+        
+        # 2. 執行 commit 提交變更到資料庫
+        self.db.commit()
+        
+        # 3. 執行 refresh 取得資料庫生成的欄位（例如 id）
+        self.db.refresh(job)
+        
+        # 4. 回傳處理完的 job 物件
+        return job
 
     def list(self) -> list[Job]:
-        """回傳所有 Job，按 created_at 降冪排序。
-
-        # TODO:
-        #   使用 select(Job).order_by(Job.created_at.desc())
-        """
-        raise NotImplementedError
+        # 1. 建立查詢語句並加上排序條件
+        stmt = select(Job).order_by(Job.created_at.desc())
+        
+        # 2. 透過 self.db 執行語句，並將結果轉換為 Job 物件列表
+        result = self.db.execute(stmt)
+        
+        # 3. 抽取出物件並轉為清單回傳
+        return result.scalars().all()
 
     def get(self, job_id: str) -> Job | None:
-        """依 primary key 取得單一 Job，找不到回傳 None。
-
-        # TODO:
-        #   使用 self.db.get(Job, job_id)
-        """
-        raise NotImplementedError
+        # 透過主鍵 (Primary Key) 找單一資料，SQLAlchemy 提供了一個專屬的超級捷徑：self.db.get()
+        return self.db.get(Job, job_id)
+        
 
     def delete(self, job: Job) -> None:
-        """刪除指定 Job 並 commit。
-
-        # TODO:
-        #   1. self.db.delete(job)
-        #   2. commit
-        """
-        raise NotImplementedError
+        
+        self.db.delete(job)
+        
+        self.db.commit()
+        
 
     def update(self, job: Job) -> Job:
-        """更新已修改的 Job 欄位並回傳（含 commit + refresh）。
-
-        # TODO:
-        #   1. self.db.add(job)（merge 進 session）
-        #   2. commit
-        #   3. refresh
-        #   4. 回傳 job
-        """
-        raise NotImplementedError
+        # SQLAlchemy 會檢查傳進來的這個 job 物件，如果這個 job 沒有 ID，執行 INSERT，
+        # 反之會自動對比哪裡被改過，然後發送 UPDATE 指令只修改那些欄位。
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(job)
+        return job
 
     def due_jobs(self, now: datetime) -> list[Job]:
-        """回傳所有已啟用且 next_fire_at <= now 的 Job，按 next_fire_at 升冪排序。
-
-        # TODO:
-        #   篩選條件：Job.enabled == True AND Job.next_fire_at <= now
-        #   排序：Job.next_fire_at.asc()
-        """
-        raise NotImplementedError
+        
+        # 1. 建立查詢語句：選擇 Job -> 加入過濾條件 -> 加入排序
+        stmt = select(Job).where(Job.enabled == True, Job.next_fire_at <= now ).order_by(Job.next_fire_at.asc())
+        
+        result = self.db.execute(stmt)
+        return result.scalars().all()
