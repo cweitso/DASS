@@ -62,7 +62,7 @@ class TaskRepository:
                 started_at = func.now()
             )
             # 這行咒語強迫 SQLAlchemy 放棄快取，直接重新同步
-            .execution_options(synchronize_session="fetch")
+            .execution_options(synchronize_session="evaluate")
         )
         
         result = self.db.execute(stmt)
@@ -106,7 +106,7 @@ class TaskRepository:
         task.status = 'pending'
         task.locked_by = None
         task.locked_until = None
-        task.started_at = datetime.now(UTC)
+        task.started_at = None
         self.db.commit()
         self.db.refresh(task)
         return task
