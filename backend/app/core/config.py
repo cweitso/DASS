@@ -1,12 +1,16 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# .env lives at the repo root; resolve absolutely so cwd doesn't matter.
+_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DASS_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="DASS_", env_file=_ENV_FILE, extra="ignore")
 
     app_name: str = "dass"
     environment: str = "local"
