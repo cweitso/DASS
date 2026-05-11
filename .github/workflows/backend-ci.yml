@@ -36,10 +36,14 @@ jobs:
             api:
               - 'backend/app/api/**'
               - 'backend/app/services/job_service.py'
+              - 'backend/app/schemas/**'
+              - 'backend/app/main.py'
             execution_service:
               - 'backend/app/services/execution_service.py'
+              - 'backend/app/utils/cron.py'
             scheduler:
               - 'backend/app/services/scheduler_service.py'
+              - 'backend/app/utils/time.py'
             worker:
               - 'backend/app/services/worker_service.py'
 
