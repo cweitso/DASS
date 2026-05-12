@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 import json
 
@@ -22,6 +23,7 @@ class WorkerService:
         self.jobs = JobRepository(db)
         self.executor = ExecutionService()
 
+    # use lock to make sure wont race condition, only one worker can claim the task
     def claim_task(self, task_id: str) -> Task | None:
         """嘗試 claim 一筆 Task，成功回傳 Task，失敗回傳 None。
 
@@ -33,19 +35,22 @@ class WorkerService:
         raise NotImplementedError
 
     def process_task_id(self, task_id: str) -> bool:
-        """處理一筆 Task 的完整流程：claim → 執行 → 記錄結果。
-
-        # TODO:
-        #   1. claim_task(task_id) — 若失敗（None）代表別人已 claim，直接 return True
-        #   2. 用 self.jobs.get(task.job_id) 取得對應 Job
-        #      - Job 不存在 → mark_failed(final=True) → return True
-        #   3. 呼叫 self.executor.run(job.action_type, job.action_config) 執行任務
-        #      - 捕獲 Exception → 包成 ExecutionResult(success=False)
-        #   4. 成功 → self.tasks.mark_success(task, result.stdout, result.stderr)
-        #   5. 失敗 → self._handle_failure(task, job, stdout, stderr)
-        #   6. return True
-        """
-        raise NotImplementedError
+        task = self.claim_task(task_id)
+        if not task:
+            return True
+        job = self.jobs.get(task.job_id)
+        if not job:
+            self.tasks.mark_failed(task, stdout="", stderr="Job not found", final=True)
+            return True
+        try:
+            result = self.executor.run(job.action_type, job.action_config)
+        except Exception as exc:
+            result = ExecutionResult(success=False, stdout="", stderr=str(exc))
+        if result.success:
+            self.tasks.mark_success(task, result.stdout, result.stderr)
+            return True
+        self._handle_failure(task, job, result.stdout, result.stderr)
+        return True
 
     def _handle_failure(self, task: Task, job, stdout: str | None, stderr: str | None) -> None:
         """處理 Task 失敗：若還有 retry 次數就建立 retry task，否則 mark final_failed。

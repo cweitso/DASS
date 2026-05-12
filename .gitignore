@@ -28,4 +28,6 @@ __MACOSX
 Thumbs.db
 
 # ─── Logs ─────────────────────────────────
-*.log
+*.log# pixi environments
+.pixi/*
+!.pixi/config.toml
