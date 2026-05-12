@@ -27,11 +27,10 @@ class WorkerService:
         locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
         started_at = utcnow()
 
-        # Atomically claim the task only if it is still pending.
         stmt = (
             update(Task)
             .where(
-                Task.id == int(task_id),
+                Task.id == task_id,
                 Task.status == "pending",
             )
             .values(
@@ -49,8 +48,8 @@ class WorkerService:
             return None
 
         self.db.commit()
+        self.db.expire_all()
 
-        # Re-fetch the task after commit so the returned object has updated values.
         return self.tasks.get(task_id)
 
     def process_task_id(self, task_id: str) -> bool:
