@@ -25,8 +25,33 @@ class WorkerService:
 
     # use lock to make sure wont race condition, only one worker can claim the task
     def claim_task(self, task_id: str) -> Task | None:
+        task = self.tasks.get(task_id)
+        if not task or task.status != "pending":
+            return None
+
         locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
-        return self.tasks.claim_pending(task_id, self.worker_id, locked_until)
+        
+        # 原子性更新確保併發安全
+        from sqlalchemy import update
+        stmt = (
+            update(Task)
+            .where(Task.id == task_id, Task.status == "pending")
+            .values(
+                status="running",
+                locked_by=self.worker_id,
+                locked_until=locked_until,
+                started_at=utcnow()
+            )
+        )
+        
+        result = self.db.execute(stmt)
+        if result.rowcount == 0:
+            self.db.rollback()
+            return None
+
+        self.db.commit()
+        self.db.refresh(task)
+        return task
 
     def process_task_id(self, task_id: str) -> bool:
         # 重試幾次，因為有可能 Message Queue 已經推播了 task_id，但是 DB 還沒 Commit 完成
