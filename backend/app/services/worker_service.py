@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
-import json
+from datetime import timedelta
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.models.task import Task
@@ -23,39 +23,40 @@ class WorkerService:
         self.jobs = JobRepository(db)
         self.executor = ExecutionService()
 
-    # use lock to make sure wont race condition, only one worker can claim the task
     def claim_task(self, task_id: str) -> Task | None:
-        task = self.tasks.get(task_id)
-        if not task or task.status != "pending":
-            return None
-
         locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
-        
-        # 原子性更新確保併發安全
-        from sqlalchemy import update
+        started_at = utcnow()
+
+        # Atomically claim the task only if it is still pending.
         stmt = (
             update(Task)
-            .where(Task.id == task_id, Task.status == "pending")
+            .where(
+                Task.id == int(task_id),
+                Task.status == "pending",
+            )
             .values(
                 status="running",
                 locked_by=self.worker_id,
                 locked_until=locked_until,
-                started_at=utcnow()
+                started_at=started_at,
             )
         )
-        
+
         result = self.db.execute(stmt)
+
         if result.rowcount == 0:
             self.db.rollback()
             return None
 
         self.db.commit()
-        self.db.refresh(task)
-        return task
+
+        # Re-fetch the task after commit so the returned object has updated values.
+        return self.tasks.get(task_id)
 
     def process_task_id(self, task_id: str) -> bool:
-        # 重試幾次，因為有可能 Message Queue 已經推播了 task_id，但是 DB 還沒 Commit 完成
         task = None
+
+        # Retry because the queue may receive task_id before DB commit is visible.
         for _ in range(5):
             task = self.claim_task(task_id)
             if task:
@@ -64,8 +65,9 @@ class WorkerService:
 
         if not task:
             return True
-            
+
         job = None
+
         for _ in range(5):
             job = self.jobs.get(task.job_id)
             if job:
@@ -75,28 +77,35 @@ class WorkerService:
         if not job:
             self.tasks.mark_failed(task, stdout="", stderr="Job not found", final=True)
             return True
+
         try:
             result = self.executor.run(job.action_type, job.action_config)
         except Exception as exc:
             result = ExecutionResult(success=False, stdout="", stderr=str(exc))
+
         if result.success:
             self.tasks.mark_success(task, result.stdout, result.stderr)
             return True
+
         self._handle_failure(task, job, result.stdout, result.stderr)
         return True
 
     def _handle_failure(self, task: Task, job, stdout: str | None, stderr: str | None) -> None:
         if task.retry_count < job.max_retries:
             self.tasks.mark_failed(task, stdout, stderr, final=False)
+
             retry_task = Task(
                 job_id=job.id,
                 status="pending",
                 trigger_type=task.trigger_type,
                 retry_count=task.retry_count + 1,
             )
+
             self.tasks.create_without_commit(retry_task)
             self.db.commit()
             self.db.refresh(retry_task)
+
             self.queue.send_task(str(retry_task.id))
             return
+
         self.tasks.mark_failed(task, stdout, stderr, final=True)
