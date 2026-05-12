@@ -25,20 +25,28 @@ class WorkerService:
 
     # use lock to make sure wont race condition, only one worker can claim the task
     def claim_task(self, task_id: str) -> Task | None:
-        """嘗試 claim 一筆 Task，成功回傳 Task，失敗回傳 None。
-
-        # TODO:
-        #   1. 計算 locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
-        #   2. 呼叫 self.tasks.claim_pending(task_id, self.worker_id, locked_until)
-        #   3. 回傳結果
-        """
-        raise NotImplementedError
+        locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
+        return self.tasks.claim_pending(task_id, self.worker_id, locked_until)
 
     def process_task_id(self, task_id: str) -> bool:
-        task = self.claim_task(task_id)
+        # 重試幾次，因為有可能 Message Queue 已經推播了 task_id，但是 DB 還沒 Commit 完成
+        task = None
+        for _ in range(5):
+            task = self.claim_task(task_id)
+            if task:
+                break
+            time.sleep(0.5)
+
         if not task:
             return True
-        job = self.jobs.get(task.job_id)
+            
+        job = None
+        for _ in range(5):
+            job = self.jobs.get(task.job_id)
+            if job:
+                break
+            time.sleep(0.5)
+
         if not job:
             self.tasks.mark_failed(task, stdout="", stderr="Job not found", final=True)
             return True
@@ -53,14 +61,17 @@ class WorkerService:
         return True
 
     def _handle_failure(self, task: Task, job, stdout: str | None, stderr: str | None) -> None:
-        """處理 Task 失敗：若還有 retry 次數就建立 retry task，否則 mark final_failed。
-
-        # TODO:
-        #   1. 若 task.retry_count < job.max_retries：
-        #      a. mark_failed(task, stdout, stderr, final=False)
-        #      b. 建立新 Task(retry_count=task.retry_count+1, status='pending')
-        #      c. create_without_commit → commit → refresh
-        #      d. queue.send_task(retry_task.id)
-        #   2. 否則：mark_failed(task, stdout, stderr, final=True)
-        """
-        raise NotImplementedError
+        if task.retry_count < job.max_retries:
+            self.tasks.mark_failed(task, stdout, stderr, final=False)
+            retry_task = Task(
+                job_id=job.id,
+                status="pending",
+                trigger_type=task.trigger_type,
+                retry_count=task.retry_count + 1,
+            )
+            self.tasks.create_without_commit(retry_task)
+            self.db.commit()
+            self.db.refresh(retry_task)
+            self.queue.send_task(str(retry_task.id))
+            return
+        self.tasks.mark_failed(task, stdout, stderr, final=True)
