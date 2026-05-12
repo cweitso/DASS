@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-import json
+import time
+from datetime import timedelta
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.models.task import Task
@@ -23,39 +24,87 @@ class WorkerService:
         self.executor = ExecutionService()
 
     def claim_task(self, task_id: str) -> Task | None:
-        """嘗試 claim 一筆 Task，成功回傳 Task，失敗回傳 None。
+        locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
+        started_at = utcnow()
 
-        # TODO:
-        #   1. 計算 locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
-        #   2. 呼叫 self.tasks.claim_pending(task_id, self.worker_id, locked_until)
-        #   3. 回傳結果
-        """
-        raise NotImplementedError
+        stmt = (
+            update(Task)
+            .where(
+                Task.id == task_id,
+                Task.status == "pending",
+            )
+            .values(
+                status="running",
+                locked_by=self.worker_id,
+                locked_until=locked_until,
+                started_at=started_at,
+            )
+        )
+
+        result = self.db.execute(stmt)
+
+        if result.rowcount == 0:
+            self.db.rollback()
+            return None
+
+        self.db.commit()
+        self.db.expire_all()
+
+        return self.tasks.get(task_id)
 
     def process_task_id(self, task_id: str) -> bool:
-        """處理一筆 Task 的完整流程：claim → 執行 → 記錄結果。
+        task = None
 
-        # TODO:
-        #   1. claim_task(task_id) — 若失敗（None）代表別人已 claim，直接 return True
-        #   2. 用 self.jobs.get(task.job_id) 取得對應 Job
-        #      - Job 不存在 → mark_failed(final=True) → return True
-        #   3. 呼叫 self.executor.run(job.action_type, job.action_config) 執行任務
-        #      - 捕獲 Exception → 包成 ExecutionResult(success=False)
-        #   4. 成功 → self.tasks.mark_success(task, result.stdout, result.stderr)
-        #   5. 失敗 → self._handle_failure(task, job, stdout, stderr)
-        #   6. return True
-        """
-        raise NotImplementedError
+        # Retry because the queue may receive task_id before DB commit is visible.
+        for _ in range(5):
+            task = self.claim_task(task_id)
+            if task:
+                break
+            time.sleep(0.5)
+
+        if not task:
+            return True
+
+        job = None
+
+        for _ in range(5):
+            job = self.jobs.get(task.job_id)
+            if job:
+                break
+            time.sleep(0.5)
+
+        if not job:
+            self.tasks.mark_failed(task, stdout="", stderr="Job not found", final=True)
+            return True
+
+        try:
+            result = self.executor.run(job.action_type, job.action_config)
+        except Exception as exc:
+            result = ExecutionResult(success=False, stdout="", stderr=str(exc))
+
+        if result.success:
+            self.tasks.mark_success(task, result.stdout, result.stderr)
+            return True
+
+        self._handle_failure(task, job, result.stdout, result.stderr)
+        return True
 
     def _handle_failure(self, task: Task, job, stdout: str | None, stderr: str | None) -> None:
-        """處理 Task 失敗：若還有 retry 次數就建立 retry task，否則 mark final_failed。
+        if task.retry_count < job.max_retries:
+            self.tasks.mark_failed(task, stdout, stderr, final=False)
 
-        # TODO:
-        #   1. 若 task.retry_count < job.max_retries：
-        #      a. mark_failed(task, stdout, stderr, final=False)
-        #      b. 建立新 Task(retry_count=task.retry_count+1, status='pending')
-        #      c. create_without_commit → commit → refresh
-        #      d. queue.send_task(retry_task.id)
-        #   2. 否則：mark_failed(task, stdout, stderr, final=True)
-        """
-        raise NotImplementedError
+            retry_task = Task(
+                job_id=job.id,
+                status="pending",
+                trigger_type=task.trigger_type,
+                retry_count=task.retry_count + 1,
+            )
+
+            self.tasks.create_without_commit(retry_task)
+            self.db.commit()
+            self.db.refresh(retry_task)
+
+            self.queue.send_task(str(retry_task.id))
+            return
+
+        self.tasks.mark_failed(task, stdout, stderr, final=True)
