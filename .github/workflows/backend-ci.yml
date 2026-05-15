@@ -1,3 +1,17 @@
+# ============================================================
+# backend-ci.yml — 單元測試第一道防線 (Sprint 4 升級版)
+# ============================================================
+# 雙觸發機制：
+#   1. dorny/paths-filter 自動偵測改動 → 跑對應 section
+#   2. PR title 加 [db] [queue] [api] [worker] [scheduler] [infra] [all]
+# 環境：SQLite + MemoryQueueClient，零 Docker 依賴，跑得快。
+#
+# Sprint 4 新增：
+#   - [infra] test job → health/metrics 增強、DB read/write routing
+#   - 路徑偵測加入 S4 新檔案（scheduler local DB、dual-write、multi-queue）
+#   - gate job (unit-tests-passed) → 給 branch protection rule 用
+# ============================================================
+
 name: Backend CI
 
 on:
@@ -11,16 +25,18 @@ defaults:
     working-directory: backend
 
 jobs:
+  # ─── Path Detection ────────────────────────────────────
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      repositories: ${{ steps.filter.outputs.repositories }}
-      queue: ${{ steps.filter.outputs.queue }}
-      api: ${{ steps.filter.outputs.api }}
-      execution_service: ${{ steps.filter.outputs.execution_service }}
-      scheduler: ${{ steps.filter.outputs.scheduler }}
-      worker: ${{ steps.filter.outputs.worker }}
+      repositories:       ${{ steps.filter.outputs.repositories }}
+      queue:              ${{ steps.filter.outputs.queue }}
+      api:                ${{ steps.filter.outputs.api }}
+      execution_service:  ${{ steps.filter.outputs.execution_service }}
+      scheduler:          ${{ steps.filter.outputs.scheduler }}
+      worker:             ${{ steps.filter.outputs.worker }}
+      infra:              ${{ steps.filter.outputs.infra }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -31,28 +47,36 @@ jobs:
               - 'backend/app/repositories/**'
               - 'backend/app/models/**'
               - 'backend/app/db/**'
+              - 'backend/alembic/**'
             queue:
               - 'backend/app/queue/**'
             api:
               - 'backend/app/api/**'
               - 'backend/app/services/job_service.py'
               - 'backend/app/schemas/**'
-              - 'backend/app/main.py'
             execution_service:
               - 'backend/app/services/execution_service.py'
               - 'backend/app/utils/cron.py'
             scheduler:
               - 'backend/app/services/scheduler_service.py'
+              - 'backend/app/scheduler/**'
               - 'backend/app/utils/time.py'
             worker:
               - 'backend/app/services/worker_service.py'
+              - 'backend/app/worker/**'
+            infra:
+              - 'backend/app/main.py'
+              - 'backend/app/core/**'
+              - 'backend/app/db/session.py'
 
+  # ─── DB Section (柏毅) ─────────────────────────────────
   test-repositories:
     name: Test / Repositories (DB Layer)
     needs: changes
     runs-on: ubuntu-latest
     if: |
       contains(github.event.pull_request.title, '[db]') ||
+      contains(github.event.pull_request.title, '[all]') ||
       needs.changes.outputs.repositories == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -62,12 +86,14 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_repositories.py -v
 
+  # ─── Queue Section (奕瑋) ──────────────────────────────
   test-queue:
-    name: Test / Queue
+    name: Test / Queue (Memory & Multi-Queue)
     needs: changes
     runs-on: ubuntu-latest
     if: |
       contains(github.event.pull_request.title, '[queue]') ||
+      contains(github.event.pull_request.title, '[all]') ||
       needs.changes.outputs.queue == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -77,12 +103,14 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_queue.py -v
 
+  # ─── API Section (岱倫) ────────────────────────────────
   test-api:
-    name: Test / API (Jobs CRUD & Handlers)
+    name: Test / API (Jobs CRUD & Pagination)
     needs: changes
     runs-on: ubuntu-latest
     if: |
       contains(github.event.pull_request.title, '[api]') ||
+      contains(github.event.pull_request.title, '[all]') ||
       needs.changes.outputs.api == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -92,12 +120,14 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_api.py -v
 
+  # ─── Execution Service ─────────────────────────────────
   test-execution-service:
     name: Test / ExecutionService (HTTP & Shell)
     needs: changes
     runs-on: ubuntu-latest
     if: |
       contains(github.event.pull_request.title, '[worker]') ||
+      contains(github.event.pull_request.title, '[all]') ||
       needs.changes.outputs.execution_service == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -107,12 +137,14 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_execution_service.py -v
 
+  # ─── Scheduler Section (Danny) ─────────────────────────
   test-scheduler:
     name: Test / Scheduler (Dispatch & Orphan Recovery)
     needs: changes
     runs-on: ubuntu-latest
     if: |
       contains(github.event.pull_request.title, '[scheduler]') ||
+      contains(github.event.pull_request.title, '[all]') ||
       needs.changes.outputs.scheduler == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -122,12 +154,14 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_scheduler.py -v
 
+  # ─── Worker Section (俊達) ─────────────────────────────
   test-worker:
     name: Test / Worker (Task Processing & Retry)
     needs: changes
     runs-on: ubuntu-latest
     if: |
       contains(github.event.pull_request.title, '[worker]') ||
+      contains(github.event.pull_request.title, '[all]') ||
       needs.changes.outputs.worker == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -136,3 +170,62 @@ jobs:
           enable-cache: true
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_worker.py -v
+
+  # ─── Sprint 4 新增：Infra (Health / Metrics / DB Routing)
+  test-infra:
+    name: Test / Infra (Health, Metrics, DB Routing)
+    needs: changes
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, '[infra]') ||
+      contains(github.event.pull_request.title, '[all]') ||
+      needs.changes.outputs.infra == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - name: Run infra tests (skip if files not yet created)
+        run: |
+          FILES=""
+          [ -f tests/test_health_metrics.py ] && FILES="$FILES tests/test_health_metrics.py"
+          [ -f tests/test_db_routing.py ]     && FILES="$FILES tests/test_db_routing.py"
+          if [ -n "$FILES" ]; then
+            uv run pytest $FILES -v
+          else
+            echo "⏭ Sprint 4 infra test files not yet created — skipping"
+          fi
+
+  # ─── Gate Job (branch protection rule 用) ──────────────
+  unit-tests-passed:
+    name: "✅ Unit Tests Gate"
+    if: always()
+    needs:
+      - test-repositories
+      - test-queue
+      - test-api
+      - test-execution-service
+      - test-scheduler
+      - test-worker
+      - test-infra
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate results
+        run: |
+          results=(
+            "${{ needs.test-repositories.result }}"
+            "${{ needs.test-queue.result }}"
+            "${{ needs.test-api.result }}"
+            "${{ needs.test-execution-service.result }}"
+            "${{ needs.test-scheduler.result }}"
+            "${{ needs.test-worker.result }}"
+            "${{ needs.test-infra.result }}"
+          )
+          for r in "${results[@]}"; do
+            if [ "$r" = "failure" ]; then
+              echo "❌ At least one unit test job failed"
+              exit 1
+            fi
+          done
+          echo "✅ All triggered unit test jobs passed (or were skipped)"
