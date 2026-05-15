@@ -1,0 +1,209 @@
+# ============================================================
+# integration-ci.yml — 整合測試第二道防線 (Sprint 4)
+# ============================================================
+# 在真實 Docker 環境 (PostgreSQL + LocalStack SQS) 中跑跨模組測試。
+#
+# 觸發條件：
+#   - push to main/develop (PR merge 後自動跑)
+#   - PR title 帶 [integration] 或 [all]
+#   - 手動 workflow_dispatch
+#
+# xfail 漸進策略：
+#   Danny 先寫好 10 個整合測試，全標 @pytest.mark.xfail。
+#   組員 merge PR 實作 stub → xfail 自動變 XPASS。
+#   Summary 追蹤 XFAIL 歸零 = Sprint 4 整合完成。
+# ============================================================
+
+name: Integration Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "docker-compose*.yml"
+      - "infra/**"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "docker-compose*.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: integration-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  # ─── PR title gate (只在 PR 時檢查 tag) ────────────────
+  should-run:
+    name: Check trigger conditions
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          elif echo "${{ github.event.pull_request.title }}" | grep -qiE '\[(integration|all)\]'; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "run=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ─── Integration Tests ─────────────────────────────────
+  integration-tests:
+    name: "🔗 Integration Tests (Docker)"
+    needs: should-run
+    if: needs.should-run.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # ── PostgreSQL (主庫) ──
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: dass_test
+          POSTGRES_USER: dass
+          POSTGRES_PASSWORD: dass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dass -d dass_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      # ── PostgreSQL (Scheduler Local DB) ──
+      postgres-scheduler:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: dass_scheduler
+          POSTGRES_USER: dass
+          POSTGRES_PASSWORD: dass
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U dass -d dass_scheduler"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      # ── LocalStack (SQS) ──
+      localstack:
+        image: localstack/localstack:3
+        env:
+          SERVICES: sqs
+          DEBUG: "0"
+        ports:
+          - 4566:4566
+        options: >-
+          --health-cmd "curl -fs http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+
+    env:
+      # ── 測試環境變數 ──
+      DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@localhost:5432/dass_test"
+      DASS_SCHEDULER_DB_URL: "postgresql+psycopg://dass:dass@localhost:5433/dass_scheduler"
+      DASS_DATABASE_REPLICA_URL: "postgresql+psycopg://dass:dass@localhost:5432/dass_test"
+      DASS_SQS_ENDPOINT_URL: "http://localhost:4566"
+      DASS_QUEUE_NAME: "dass-tasks"
+      DASS_QUEUE_NAME_NORMAL: "dass-tasks-normal"
+      DASS_QUEUE_NAME_RETRY: "dass-tasks-retry"
+      DASS_QUEUE_BACKEND: "sqs"
+      DASS_AWS_REGION: "us-east-1"
+      DASS_AWS_ACCESS_KEY_ID: "test"
+      DASS_AWS_SECRET_ACCESS_KEY: "test"
+      DASS_WORKER_ID: "ci-worker"
+      DASS_ENVIRONMENT: "test"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      # ── 等 LocalStack SQS ready ──
+      - name: Wait for LocalStack SQS
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:4566/_localstack/health | grep -qE '"sqs":\s*"(running|available)"'; then
+              echo "✅ SQS is ready"
+              break
+            fi
+            echo "Waiting for SQS... ($i/30)"
+            sleep 2
+          done
+
+      # ── 建立 SQS Queues ──
+      - name: Create SQS queues
+        run: |
+          aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name dass-tasks --region us-east-1
+          aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name dass-tasks-normal --region us-east-1
+          aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name dass-tasks-retry --region us-east-1
+          echo "✅ SQS queues created"
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+
+      # ── 跑 Alembic migration ──
+      - name: Run DB migrations (Main DB)
+        run: uv run alembic upgrade head
+
+      - name: Run DB migrations (Scheduler DB)
+        run: uv run alembic upgrade head
+        env:
+          DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@localhost:5433/dass_scheduler"
+
+      # ── 整合測試 ──
+      - name: Run integration tests
+        run: |
+          uv run pytest tests/integration/ \
+            -m integration \
+            -v --tb=long \
+            --override-ini="addopts=" \
+            2>&1 | tee integration-results.txt
+
+      # ── xfail 摘要報告 ──
+      - name: Integration summary
+        if: always()
+        run: |
+          echo "## 🔗 Integration Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          PASSED=$(grep -c " PASSED" integration-results.txt 2>/dev/null || echo 0)
+          XFAILED=$(grep -c " XFAIL" integration-results.txt 2>/dev/null || echo 0)
+          XPASSED=$(grep -c " XPASS" integration-results.txt 2>/dev/null || echo 0)
+          FAILED=$(grep -c " FAILED" integration-results.txt 2>/dev/null || echo 0)
+          ERRORS=$(grep -c " ERROR" integration-results.txt 2>/dev/null || echo 0)
+
+          echo "| Status | Count | 說明 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Passed | $PASSED | 已通過 |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏳ XFail | $XFAILED | Sprint 4 功能尚未實作 |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎉 XPass | $XPASSED | 新 PR 讓測試通過了! |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ Failed | $FAILED | 回歸錯誤 |" >> $GITHUB_STEP_SUMMARY
+          echo "| 💥 Error | $ERRORS | 測試本身有問題 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Sprint 4 進度：XFail 歸零 + 全部 Passed = 整合完成 🏁_" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: backend/integration-results.txt
+          retention-days: 14

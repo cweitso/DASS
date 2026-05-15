@@ -38,4 +38,9 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "integration: 整合測試 — 需要 Docker services (PostgreSQL + LocalStack)",
+]
+# 預設跑 unit test 時忽略 integration 目錄，避免本地缺 Docker 爆掉
+addopts = "--ignore=tests/integration"
 
