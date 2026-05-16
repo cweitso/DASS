@@ -1,15 +1,9 @@
 # ============================================================
-# backend-ci.yml — 單元測試第一道防線 (Sprint 4 升級版)
+# backend-ci.yml — unit tests (Sprint 4)
 # ============================================================
-# 雙觸發機制：
-#   1. dorny/paths-filter 自動偵測改動 → 跑對應 section
-#   2. PR title 加 [db] [queue] [api] [worker] [scheduler] [infra] [all]
-# 環境：SQLite + MemoryQueueClient，零 Docker 依賴，跑得快。
-#
-# Sprint 4 新增：
-#   - [infra] test job → health/metrics 增強、DB read/write routing
-#   - 路徑偵測加入 S4 新檔案（scheduler local DB、dual-write、multi-queue）
-#   - gate job (unit-tests-passed) → 給 branch protection rule 用
+# Triggers: dorny/paths-filter on changed paths; PR title tags [db|queue|api|worker|scheduler|infra|all]
+# Environment: SQLite + MemoryQueueClient, no Docker required.
+# Gate job (unit-tests-passed) used for branch protection rules.
 # ============================================================
 
 name: Backend CI
@@ -25,7 +19,6 @@ defaults:
     working-directory: backend
 
 jobs:
-  # ─── Path Detection ────────────────────────────────────
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
@@ -69,7 +62,6 @@ jobs:
               - 'backend/app/core/**'
               - 'backend/app/db/session.py'
 
-  # ─── DB Section (柏毅) ─────────────────────────────────
   test-repositories:
     name: Test / Repositories (DB Layer)
     needs: changes
@@ -86,7 +78,6 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_repositories.py -v
 
-  # ─── Queue Section (奕瑋) ──────────────────────────────
   test-queue:
     name: Test / Queue (Memory & Multi-Queue)
     needs: changes
@@ -103,7 +94,6 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_queue.py -v
 
-  # ─── API Section (岱倫) ────────────────────────────────
   test-api:
     name: Test / API (Jobs CRUD & Pagination)
     needs: changes
@@ -120,7 +110,6 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_api.py -v
 
-  # ─── Execution Service ─────────────────────────────────
   test-execution-service:
     name: Test / ExecutionService (HTTP & Shell)
     needs: changes
@@ -137,7 +126,6 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_execution_service.py -v
 
-  # ─── Scheduler Section (Danny) ─────────────────────────
   test-scheduler:
     name: Test / Scheduler (Dispatch & Orphan Recovery)
     needs: changes
@@ -154,7 +142,6 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_scheduler.py -v
 
-  # ─── Worker Section (俊達) ─────────────────────────────
   test-worker:
     name: Test / Worker (Task Processing & Retry)
     needs: changes
@@ -171,7 +158,6 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_worker.py -v
 
-  # ─── Sprint 4 新增：Infra (Health / Metrics / DB Routing)
   test-infra:
     name: Test / Infra (Health, Metrics, DB Routing)
     needs: changes
@@ -197,7 +183,6 @@ jobs:
             echo "⏭ Sprint 4 infra test files not yet created — skipping"
           fi
 
-  # ─── Gate Job (branch protection rule 用) ──────────────
   unit-tests-passed:
     name: "✅ Unit Tests Gate"
     if: always()
@@ -212,6 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate results
+        working-directory: ${{ github.workspace }}
         run: |
           results=(
             "${{ needs.test-repositories.result }}"
