@@ -61,8 +61,8 @@ class TaskRepository:
                 locked_until = locked_until,
                 started_at = func.now()
             )
-            # 這行咒語強迫 SQLAlchemy 放棄快取，直接重新同步
-            .execution_options(synchronize_session="evaluate")
+            # 這行咒語強迫 SQLAlchemy 放棄快取，直接重新同步, 用 evaluate 可以提升效能( 少一次 select )但會導致快取未同步
+            .execution_options(synchronize_session="fetch")
         )
         
         result = self.db.execute(stmt)
