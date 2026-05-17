@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     queue_backend: Literal["sqs", "memory"] = "sqs"
     queue_name: str = "dass-tasks"
+    queue_name_normal: str = "dass-tasks-normal"
+    queue_name_retry: str = "dass-tasks-retry"
     aws_region: str = "us-east-1"
     aws_access_key_id: str = Field(default="dass")
     aws_secret_access_key: str = Field(default="dass")

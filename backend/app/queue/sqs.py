@@ -14,8 +14,9 @@ class SQSQueueClient:
     Conforms to the QueueClient Protocol structurally; no inheritance needed.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, queue_name: str | None = None):
         self.settings = settings
+        self._queue_name = queue_name or settings.queue_name
         self.client = boto3.client(
             "sqs",
             region_name=settings.aws_region,
@@ -29,10 +30,10 @@ class SQSQueueClient:
     def _resolve_queue_url(self) -> str:
         # Look up the queue; create it on first run if missing.
         try:
-            response = self.client.get_queue_url(QueueName=self.settings.queue_name)
+            response = self.client.get_queue_url(QueueName=self._queue_name)
             return response["QueueUrl"]
         except self.client.exceptions.QueueDoesNotExist:
-            response = self.client.create_queue(QueueName=self.settings.queue_name)
+            response = self.client.create_queue(QueueName=self._queue_name)
             return response["QueueUrl"]
 
     def send_task(self, task_id: str) -> None:
