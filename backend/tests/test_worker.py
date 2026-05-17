@@ -45,7 +45,7 @@ class TestWorkerService:
         assert claimed is not None
         assert claimed.status == "running"
 
-    def test_worker_executes_http_action(self, monkeypatch, db_session):
+    def test_worker_executes_http_action(self, db_session):
         """Worker should execute HTTP action and mark task as success."""
         queue = MemoryQueueClient()
         job = _job(db_session)
@@ -53,26 +53,14 @@ class TestWorkerService:
         db_session.add(task)
         db_session.commit()
 
-        class DummyResponse:
-            is_success = True
-            status_code = 200
-            text = "ok"
-
-        class DummyClient:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def request(self, *args, **kwargs):
-                return DummyResponse()
-
-        monkeypatch.setattr(
-            "app.services.execution_service.httpx.Client",
-            lambda timeout: DummyClient(),
-        )
         service = WorkerService(db_session, queue, "worker-1")
+
+        class SuccessExecutor:
+            def run(self, *args, **kwargs):
+                from app.services.execution_service import ExecutionResult
+                return ExecutionResult(success=True, stdout="ok", stderr="")
+
+        service.executor = SuccessExecutor()
         assert service.process_task_id(str(task.id))
         updated = db_session.get(Task, task.id)
         assert updated.status == "success"
@@ -89,10 +77,52 @@ class TestWorkerService:
         class FailingExecutor:
             def run(self, *args, **kwargs):
                 from app.services.execution_service import ExecutionResult
-
                 return ExecutionResult(success=False, stdout="", stderr="boom")
 
         service.executor = FailingExecutor()
         service.process_task_id(str(task.id))
         tasks = db_session.query(Task).filter(Task.job_id == job.id).all()
         assert len(tasks) == 2
+        
+        # Verify the new task
+        new_task = sorted(tasks, key=lambda t: t.retry_count)[1]
+        assert new_task.status == "pending"
+        assert new_task.retry_count == 1
+
+    def test_no_retry_final_failure(self, db_session):
+        """Worker should mark task as final failure without retries."""
+        queue = MemoryQueueClient()
+        job = _job(db_session, max_retries=0)
+        task = Task(job_id=job.id, status="pending", trigger_type="manual", retry_count=0)
+        db_session.add(task)
+        db_session.commit()
+        service = WorkerService(db_session, queue, "worker-1")
+
+        class FailingExecutor:
+            def run(self, *args, **kwargs):
+                from app.services.execution_service import ExecutionResult
+                return ExecutionResult(success=False, stdout="", stderr="boom")
+
+        service.executor = FailingExecutor()
+        service.process_task_id(str(task.id))
+        tasks = db_session.query(Task).filter(Task.job_id == job.id).all()
+        assert len(tasks) == 1
+        assert tasks[0].status == "final_failed"
+
+    def test_job_not_found(self, db_session):
+        """Worker should handle task where job was deleted."""
+        queue = MemoryQueueClient()
+        job = _job(db_session)
+        task = Task(job_id=job.id, status="pending", trigger_type="manual", retry_count=0)
+        db_session.add(task)
+        
+        # Delete job
+        db_session.delete(job)
+        db_session.commit()
+
+        service = WorkerService(db_session, queue, "worker-1")
+        service.process_task_id(str(task.id))
+        
+        updated = db_session.get(Task, task.id)
+        assert updated.status == "final_failed"
+        assert updated.stderr == "Job not found"

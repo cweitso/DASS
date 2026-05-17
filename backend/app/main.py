@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from app.api.v1.jobs import router as jobs_router
 from app.api.v1.tasks import router as tasks_router
+from app.api.v1.vms import router as vms_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
@@ -25,6 +26,7 @@ app.add_middleware(
 
 app.include_router(jobs_router)
 app.include_router(tasks_router)
+app.include_router(vms_router)
 
 
 @app.get("/health")

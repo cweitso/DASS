@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from collections import namedtuple
 from datetime import UTC, datetime
 
@@ -26,33 +28,58 @@ def test_next_cron_time_preserves_timezone_for_naive_cron_result(monkeypatch):
     assert result.tzinfo == UTC
 
 
-def test_execution_service_http_uses_json_for_dict_body(monkeypatch):
-    captured = {}
+def test_execution_service_container_action(monkeypatch):
+    captured_args = None
+    captured_kwargs = None
 
-    class DummyResponse:
-        is_success = True
-        status_code = 200
-        text = "ok"
+    class CompletedProcess:
+        returncode = 0
+        stdout = "container output"
+        stderr = ""
 
-    class DummyClient:
-        def __init__(self, timeout):
-            self.timeout = timeout
+    def mock_run(*args, **kwargs):
+        nonlocal captured_args, captured_kwargs
+        captured_args = args[0]
+        captured_kwargs = kwargs
+        return CompletedProcess()
 
-        def __enter__(self):
-            return self
+    monkeypatch.setattr("app.services.execution_service.subprocess.run", mock_run)
 
-        def __exit__(self, *args):
-            return False
+    service = ExecutionService()
+    result = service.run(
+        "container",
+        {
+            "image": "my-alpine:latest",
+            "command": "echo hello",
+            "env": {"TEST_VAR": "123"},
+            "timeout_seconds": 10,
+        },
+    )
 
-        def request(self, method, url, headers=None, content=None, json=None):
-            captured["method"] = method
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["content"] = content
-            captured["json"] = json
-            return DummyResponse()
+    assert result.success is True
+    assert result.stdout == "container output"
+    assert "docker" in captured_args
+    assert "run" in captured_args
+    assert "my-alpine:latest" in captured_args
+    assert "-e" in captured_args
+    assert "TEST_VAR=123" in captured_args
+    assert captured_kwargs["timeout"] == 10
 
-    monkeypatch.setattr("app.services.execution_service.httpx.Client", lambda timeout: DummyClient(timeout))
+
+def test_execution_service_fallback_action(monkeypatch):
+    captured_args = None
+
+    class CompletedProcess:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def mock_run(*args, **kwargs):
+        nonlocal captured_args
+        captured_args = args[0]
+        return CompletedProcess()
+
+    monkeypatch.setattr("app.services.execution_service.subprocess.run", mock_run)
 
     service = ExecutionService()
     result = service.run(
@@ -60,42 +87,42 @@ def test_execution_service_http_uses_json_for_dict_body(monkeypatch):
         {
             "method": "POST",
             "url": "https://example.com",
-            "headers": {"X-Trace": "1"},
-            "body": {"hello": "world"},
             "timeout_seconds": 3,
         },
     )
 
-    assert result == ExecutionResult(success=True, stdout="status=200\nok", stderr="")
-    assert captured["method"] == "POST"
-    assert captured["url"] == "https://example.com"
-    assert captured["headers"] == {"X-Trace": "1"}
-    assert captured["content"] is None
-    assert captured["json"] == {"hello": "world"}
+    assert result.success is True
+    assert "allen/default-runner:latest" in captured_args
+    assert "-e" in captured_args
+    assert "ACTION_TYPE=http" in captured_args
+    
+    # Check that ACTION_CONFIG_JSON was passed
+    config_json = json.dumps({"method": "POST", "url": "https://example.com", "timeout_seconds": 3})
+    assert f"ACTION_CONFIG_JSON={config_json}" in captured_args
 
 
-def test_execution_service_shell_reports_exit_code(monkeypatch):
-    CompletedProcess = namedtuple("CompletedProcess", ["returncode", "stdout", "stderr"])
+def test_execution_service_timeout(monkeypatch):
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
 
-    monkeypatch.setattr(
-        "app.services.execution_service.subprocess.run",
-        lambda *args, **kwargs: CompletedProcess(returncode=1, stdout="hello\n", stderr="boom\n"),
-    )
+    monkeypatch.setattr("app.services.execution_service.subprocess.run", mock_run)
 
     service = ExecutionService()
-    result = service.run("shell", {"command": "echo hello", "timeout_seconds": 5})
+    result = service.run("container", {"image": "busybox", "timeout_seconds": 2})
 
     assert result.success is False
-    assert result.stdout == "hello\n"
-    assert result.stderr == "boom\n"
-    assert result.exit_code == 1
+    assert "timed out after 2s" in result.stderr
 
 
-def test_execution_service_rejects_unsupported_action_type():
+def test_execution_service_invalid_env_key():
     service = ExecutionService()
+    result = service.run(
+        "container",
+        {
+            "image": "busybox",
+            "env": {"FOO=BAR": "baz"},
+        },
+    )
 
-    with pytest.raises(HTTPException) as exc_info:
-        service.run("email", {})
-
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Unsupported action type"
+    assert result.success is False
+    assert "Invalid environment variable key" in result.stderr
