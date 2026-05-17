@@ -47,6 +47,21 @@ class TestMemoryQueueClient:
         # Test that delete doesn't raise.
         assert True
 
+    def test_two_instances_are_isolated(self):
+        normal = MemoryQueueClient()
+        retry = MemoryQueueClient()
+
+        normal.send_task("normal-task")
+        retry.send_task("retry-task")
+
+        normal_msgs = normal.receive_tasks(max_messages=5, wait_time_seconds=0)
+        retry_msgs = retry.receive_tasks(max_messages=5, wait_time_seconds=0)
+
+        assert len(normal_msgs) == 1
+        assert json.loads(normal_msgs[0].body)["task_id"] == "normal-task"
+        assert len(retry_msgs) == 1
+        assert json.loads(retry_msgs[0].body)["task_id"] == "retry-task"
+
     def test_fifo_order(self):
         queue = MemoryQueueClient()
         for i in range(5):

@@ -8,7 +8,7 @@ import time
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
-from app.queue.factory import get_queue_client
+from app.queue.factory import get_queue_client, get_retry_queue_client
 from app.services.scheduler_service import SchedulerService
 from app.services.worker_service import WorkerService
 
@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 def run_scheduler() -> None:
     """啟動 Scheduler 主迴圈。
-
-    # TODO:
     #   1. 取得 settings，設定 logging
     #   2. 取得 queue_client
     #   3. 無限迴圈：
@@ -27,8 +25,24 @@ def run_scheduler() -> None:
     #      c. 執行 recover_orphans()
     #      d. 執行 dispatch_due_jobs()
     #      e. sleep(settings.scheduler_interval_seconds)
+    # TODO:
+    #   完成這次 MVP 後去測試 scheduler() 是否會變成效能瓶頸
     """
-    raise NotImplementedError
+    settings = get_settings()
+    configure_logging(level=settings.log_level)
+
+    queue_client = get_queue_client()
+
+    while True:
+        try:
+            with SessionLocal() as db:
+                service = SchedulerService(db, queue_client, settings.worker_visibility_timeout_seconds)
+                service.recover_orphans()
+                service.dispatch_due_jobs()
+        except Exception as e:
+            logger.error(f"Scheduler cycle failed: {e}")
+        finally:
+            time.sleep(settings.scheduler_interval_seconds)
 
 
 import concurrent.futures
@@ -161,8 +175,7 @@ def main() -> None:
     elif command == "worker":
         run_worker()
     else:
-        print(f"Unknown command: {command}")
-        sys.exit(1)
+        raise SystemExit("Unknown command: " + command)
 
 
 if __name__ == "__main__":

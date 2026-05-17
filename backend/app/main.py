@@ -32,23 +32,23 @@ app.include_router(vms_router)
 @app.get("/health")
 def health():
     """Health check endpoint：確認 DB 連線正常。
-
-    # TODO:
     #   1. 用 SessionLocal() 開 session
     #   2. 執行 SELECT 1 確認 DB 連線
     #   3. 回傳 {"status": "ok", "service": "dass"}
     """
-    raise NotImplementedError
-
+    with SessionLocal() as db:
+        db.execute(text("SELECT 1"))
+    return {"status": "ok", "service": "dass"}
 
 @app.get("/metrics")
 def metrics():
     """回傳 Job 和 Task 的統計數字。
-
-    # TODO:
     #   1. 用 SessionLocal() 開 session
     #   2. SELECT count(*) FROM jobs
     #   3. SELECT count(*) FROM tasks
     #   4. 回傳 {"jobs": int, "tasks": int}
     """
-    raise NotImplementedError
+    with SessionLocal() as db:
+        num_jobs = db.execute(text("SELECT count(*) FROM jobs")).scalar()
+        num_tasks = db.execute(text("SELECT count(*) FROM tasks")).scalar()
+    return {"jobs": num_jobs, "tasks": num_tasks}
