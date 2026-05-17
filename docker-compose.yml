@@ -50,6 +50,7 @@ services:
       - .env
     environment:
       DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-api-server}
     ports:
@@ -79,6 +80,7 @@ services:
       - .env
     environment:
       DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-scheduler}
     depends_on:
@@ -101,6 +103,7 @@ services:
       - .env
     environment:
       DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-worker}
     depends_on:
