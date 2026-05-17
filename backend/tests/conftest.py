@@ -44,7 +44,7 @@ def client(db_session, monkeypatch):
             pass
 
     monkeypatch.setattr("app.api.v1.jobs.get_queue_client", lambda: MemoryQueueClient())
-    monkeypatch.setattr("app.api.v1.tasks.get_queue_client", lambda: MemoryQueueClient())
+    monkeypatch.setattr("app.api.v1.tasks.get_retry_queue_client", lambda: MemoryQueueClient())
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
         yield test_client

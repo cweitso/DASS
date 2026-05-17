@@ -234,7 +234,7 @@ def test_api_job_crud_on_postgres(main_db, monkeypatch):
             pass
 
     monkeypatch.setattr("app.api.v1.jobs.get_queue_client", lambda: MemoryQueueClient())
-    monkeypatch.setattr("app.api.v1.tasks.get_queue_client", lambda: MemoryQueueClient())
+    monkeypatch.setattr("app.api.v1.tasks.get_retry_queue_client", lambda: MemoryQueueClient())
     app.dependency_overrides[get_db] = override_get_db
 
     try:
@@ -288,7 +288,7 @@ def test_dual_write_api_to_scheduler_db(main_db, scheduler_db, monkeypatch):
             pass
 
     monkeypatch.setattr("app.api.v1.jobs.get_queue_client", lambda: MemoryQueueClient())
-    monkeypatch.setattr("app.api.v1.tasks.get_queue_client", lambda: MemoryQueueClient())
+    monkeypatch.setattr("app.api.v1.tasks.get_retry_queue_client", lambda: MemoryQueueClient())
     app.dependency_overrides[get_db] = override_get_db
 
     job_name = f"integ-dual-write-{uuid4().hex[:8]}"
@@ -326,7 +326,6 @@ def test_dual_write_api_to_scheduler_db(main_db, scheduler_db, monkeypatch):
     assert scheduler_job.name == job_name
 
 
-@pytest.mark.xfail(reason="S4-QUEUE-02 multi-queue routing not implemented", strict=False)
 def test_retry_enqueues_to_retry_queue(main_db, make_job, make_task, purge_queues, sqs_client):
     """On failure, retry task must go to Retry Queue, not Normal Queue (S4-QUEUE-02)."""
     from app.core.config import Settings
@@ -340,12 +339,16 @@ def test_retry_enqueues_to_retry_queue(main_db, make_job, make_task, purge_queue
         queue_backend="sqs",
     )
     normal_sqs = SQSQueueClient(settings)
+    retry_sqs = SQSQueueClient(
+        settings,
+        queue_name=os.environ.get("DASS_QUEUE_NAME_RETRY", "dass-tasks-retry"),
+    )
 
     job = make_job(name="integ-multi-queue", max_retries=2)
     task = make_task(job.id, status="pending", retry_count=0)
     main_db.flush()
 
-    service = WorkerService(main_db, normal_sqs, "ci-worker")
+    service = WorkerService(main_db, normal_sqs, "ci-worker", retry_queue=retry_sqs)
 
     class FailExecutor:
         def run(self, *a, **kw):
