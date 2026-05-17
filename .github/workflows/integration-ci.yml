@@ -133,15 +133,18 @@ jobs:
 
       - name: Create SQS queues
         run: |
-          aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name dass-tasks --region us-east-1
-          aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name dass-tasks-normal --region us-east-1
-          aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name dass-tasks-retry --region us-east-1
+          # Use awslocal inside the LocalStack service container so the step works
+          # on both real GitHub Actions runners and slim `act` images that lack awscli.
+          LOCALSTACK_CID=$(docker ps --filter "ancestor=localstack/localstack:3" --format "{{.ID}}" | head -1)
+          if [ -z "$LOCALSTACK_CID" ]; then
+            echo "❌ LocalStack service container not found" >&2
+            docker ps >&2
+            exit 1
+          fi
+          for q in dass-tasks dass-tasks-normal dass-tasks-retry; do
+            docker exec "$LOCALSTACK_CID" awslocal sqs create-queue --queue-name "$q"
+          done
           echo "✅ SQS queues created"
-        env:
-          AWS_ACCESS_KEY_ID: test
-          AWS_SECRET_ACCESS_KEY: test
-          AWS_DEFAULT_REGION: us-east-1
-          AWS_EC2_METADATA_DISABLED: "true"
 
       - name: Run DB migrations (Main DB)
         run: uv run alembic upgrade head
