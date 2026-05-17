@@ -7,6 +7,7 @@ services:
       POSTGRES_PASSWORD: dass
     volumes:
       - dass-postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-primary:/docker-entrypoint-initdb.d # 把腳本資料夾對應到 Docker 內部的初始化目錄
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dass -d dass"]
       interval: 5s
@@ -18,6 +19,29 @@ services:
     labels:
       com.dass.project: dass
       com.dass.service: postgres
+
+  postgres-replica:
+    image: postgres:16-alpine
+    # 🌟 關鍵：不用官方的開機流程，改用我們寫的影子腳本開機
+    entrypoint: ["/init-script/entrypoint-replica.sh"]
+    environment:
+      POSTGRES_DB: dass
+      POSTGRES_USER: dass
+      POSTGRES_PASSWORD: dass
+    volumes:
+      # 掛載副本自己的永久硬碟
+      - dass-replica-data:/var/lib/postgresql/data
+      # 把 entrypoint 腳本資料夾掛載進去
+      - ./infra/postgres/init-replica:/init-script
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dass-net
+    labels:
+      com.dass.project: dass
+      com.dass.service: postgres-replica
 
   localstack:
     image: localstack/localstack:3
@@ -135,6 +159,7 @@ services:
 
 volumes:
   dass-postgres-data:
+  dass-replica-data:      # 副本的硬碟
   dass-localstack-data:
 
 networks:
