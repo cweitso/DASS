@@ -1,0 +1,11 @@
+# Defaults for `act` when run inside this repo (nektos/act, https://nektosact.com).
+#
+# Why --env-file=/dev/null:
+#   `act` auto-loads ./.env as --env-file, which leaks dev shell vars
+#   (e.g. DASS_DATABASE_URL pointing at the docker-compose `postgres` host)
+#   into the runner and SHADOWS the workflow's own `env:` block. That made
+#   alembic try to resolve host `postgres` from inside the act runner, even
+#   though integration-ci.yml sets DASS_DATABASE_URL=...@localhost:5432/...
+#   Pointing --env-file at /dev/null disables the auto-load; workflow `env:`
+#   wins. Pair with .actignore (excludes .env from the cp'd workdir).
+--env-file=/dev/null

@@ -1,0 +1,22 @@
+# Files excluded when `act` (nektos/act) syncs the working tree into the
+# runner container via actions/checkout@v4. Without this, gitignored files
+# like local `.env` overrides leak into act runs and shadow workflow-level
+# env vars (see incident: alembic resolved DB host as `postgres` instead of
+# `localhost` because local docker-compose .env was copied in).
+
+.env
+.env.local
+.env.*.local
+
+.venv/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+node_modules/
+.next/
+dist/
+build/
+
+.git/
