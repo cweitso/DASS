@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://dass:dass@postgres:5432/dass"
     database_echo: bool = False
+    
+    replica_database_url: str | None = None # (允許為空，當作單機模式的退路)
 
     queue_backend: Literal["sqs", "memory"] = "sqs"
     queue_name: str = "dass-tasks"
