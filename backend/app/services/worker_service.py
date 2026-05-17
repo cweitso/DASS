@@ -14,7 +14,13 @@ from app.utils.time import utcnow
 
 
 class WorkerService:
-    def __init__(self, db: Session, queue_client, worker_id: str, claim_seconds: int = 300):
+    def __init__(
+        self,
+        db: Session,
+        queue_client,
+        worker_id: str,
+        claim_seconds: int = 3600,
+    ):
         self.db = db
         self.queue = queue_client
         self.worker_id = worker_id
@@ -53,34 +59,18 @@ class WorkerService:
         return self.tasks.get(task_id)
 
     def process_task_id(self, task_id: str) -> bool:
-        task = None
-
-        # Retry because the queue may receive task_id before DB commit is visible.
-        for _ in range(5):
-            task = self.claim_task(task_id)
-            if task:
-                break
-            time.sleep(0.5)
+        task = self._claim_task_with_retry(task_id)
 
         if not task:
             return True
 
-        job = None
-
-        for _ in range(5):
-            job = self.jobs.get(task.job_id)
-            if job:
-                break
-            time.sleep(0.5)
+        job = self._get_job_with_retry(task.job_id)
 
         if not job:
             self.tasks.mark_failed(task, stdout="", stderr="Job not found", final=True)
             return True
 
-        try:
-            result = self.executor.run(job.action_type, job.action_config)
-        except Exception as exc:
-            result = ExecutionResult(success=False, stdout="", stderr=str(exc))
+        result = self._execute_job(job)
 
         if result.success:
             self.tasks.mark_success(task, result.stdout, result.stderr)
@@ -88,6 +78,35 @@ class WorkerService:
 
         self._handle_failure(task, job, result.stdout, result.stderr)
         return True
+
+    def _claim_task_with_retry(self, task_id: str) -> Task | None:
+        for _ in range(5):
+            task = self.claim_task(task_id)
+            if task:
+                return task
+            time.sleep(0.5)
+        return None
+
+    def _get_job_with_retry(self, job_id: str):
+        for _ in range(5):
+            job = self.jobs.get(job_id)
+            if job:
+                return job
+            time.sleep(0.5)
+        return None
+
+    def _execute_job(self, job) -> ExecutionResult:
+        from app.services.execution_service import ContainerSpec
+        
+        try:
+            # Worker 完全無腦，只負責把 DB 拿出來的 JSON mapping 到 dataclass 後執行
+            # 如果預期外沒有 runtime_spec，給個 fallback 或直接讓它報錯
+            spec_data = job.runtime_spec or {}
+            spec = ContainerSpec(**spec_data)
+            
+            return self.executor.run(spec)
+        except Exception as exc:
+            return ExecutionResult(success=False, stdout="", stderr=str(exc), exit_code=None)
 
     def _handle_failure(self, task: Task, job, stdout: str | None, stderr: str | None) -> None:
         if task.retry_count < job.max_retries:

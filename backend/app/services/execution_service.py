@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
-import httpx
 from fastapi import HTTPException
 
-from app.schemas.job import HttpActionConfig, ShellActionConfig
+from app.schemas.job import ContainerActionConfig
+
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass
+class ContainerSpec:
+    image: str
+    command: list[str] | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    timeout_seconds: int = 300
+    cpu: float | None = None
+    memory_mb: int | None = None
+    working_dir: str | None = None
 
 
 @dataclass
@@ -19,55 +35,71 @@ class ExecutionResult:
 
 
 class ExecutionService:
-    def run(self, action_type: str, action_config: dict) -> ExecutionResult:
-        """根據 action_type 分派到對應的執行方法。"""
-        if action_type == 'http':
-            return self._run_http(HttpActionConfig.model_validate(action_config))
-        elif action_type == 'shell':
-            return self._run_shell(ShellActionConfig.model_validate(action_config))
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported action type")
-
-    def _run_http(self, config: HttpActionConfig) -> ExecutionResult:
-        """執行 HTTP request 並回傳結果。"""
-        kwargs = {}
-        if config.body is not None:
-            if isinstance(config.body, dict):
-                kwargs["json"] = config.body
-            else:
-                kwargs["content"] = str(config.body)
-
+    def run(self, spec: ContainerSpec) -> ExecutionResult:
+        """Execute a job as a Docker container using a pre-built ContainerSpec."""
         try:
-            with httpx.Client(timeout=config.timeout_seconds) as client:
-                response = client.request(
-                    method=config.method,
-                    url=config.url,
-                    headers=config.headers,
-                    **kwargs
-                )
-                success = response.is_success
-                stdout = f"status={response.status_code}\n{response.text}"
-                stderr = "" if success else f"HTTP {response.status_code}"
-                return ExecutionResult(success=success, stdout=stdout, stderr=stderr)
+            return self._run_container(spec)
         except Exception as exc:
             return ExecutionResult(success=False, stdout="", stderr=str(exc))
 
-    def _run_shell(self, config: ShellActionConfig) -> ExecutionResult:
-        """執行 shell command 並回傳結果。"""
+    def _run_container(self, spec: ContainerSpec) -> ExecutionResult:
+        docker_cmd = ["docker", "run", "--rm"]
+
+        # Security note:
+        # Do not allow user-controlled --privileged, host networking, host volume mounts,
+        # or raw Docker args. On EC2 workers, also prevent containers from reaching
+        # the instance metadata endpoint 169.254.169.254 if the worker has an IAM role.
+        if spec.cpu is not None:
+            docker_cmd.extend(["--cpus", str(spec.cpu)])
+
+        if spec.memory_mb is not None:
+            docker_cmd.extend(["--memory", f"{spec.memory_mb}m"])
+
+        if spec.working_dir:
+            docker_cmd.extend(["-w", spec.working_dir])
+
+        for key, value in spec.env.items():
+            if not _ENV_KEY_RE.match(key):
+                return ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr=f"Invalid environment variable key: {key}",
+                )
+            docker_cmd.extend(["-e", f"{key}={value}"])
+
+        docker_cmd.append(spec.image)
+
+        if spec.command:
+            docker_cmd.extend(spec.command)
+
         try:
             result = subprocess.run(
-                config.command,
-                shell=True,
+                docker_cmd,
                 capture_output=True,
                 text=True,
-                timeout=config.timeout_seconds,
-                check=False
+                timeout=spec.timeout_seconds,
+                check=False,
             )
+
             return ExecutionResult(
                 success=result.returncode == 0,
                 stdout=result.stdout,
                 stderr=result.stderr,
-                exit_code=result.returncode
+                exit_code=result.returncode,
             )
+
+        except subprocess.TimeoutExpired as exc:
+            return ExecutionResult(
+                success=False,
+                stdout=exc.stdout if isinstance(exc.stdout, str) else "",
+                stderr=f"Container execution timed out after {spec.timeout_seconds}s",
+                exit_code=None,
+            )
+
         except Exception as exc:
-            return ExecutionResult(success=False, stdout="", stderr=str(exc))
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr=str(exc),
+                exit_code=None,
+            )
