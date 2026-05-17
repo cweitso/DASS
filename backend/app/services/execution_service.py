@@ -1,16 +1,8 @@
 from __future__ import annotations
 
-import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any
-
-from fastapi import HTTPException
-
-from app.schemas.job import ContainerActionConfig
-
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
