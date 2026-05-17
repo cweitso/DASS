@@ -14,9 +14,10 @@ from app.utils.time import utcnow
 
 
 class WorkerService:
-    def __init__(self, db: Session, queue_client, worker_id: str, claim_seconds: int = 300):
+    def __init__(self, db: Session, queue_client, worker_id: str, claim_seconds: int = 300, retry_queue=None):
         self.db = db
         self.queue = queue_client
+        self.retry_queue = retry_queue if retry_queue is not None else queue_client
         self.worker_id = worker_id
         self.claim_seconds = claim_seconds
         self.tasks = TaskRepository(db)
@@ -104,7 +105,7 @@ class WorkerService:
             self.db.commit()
             self.db.refresh(retry_task)
 
-            self.queue.send_task(str(retry_task.id))
+            self.retry_queue.send_task(str(retry_task.id))
             return
 
         self.tasks.mark_failed(task, stdout, stderr, final=True)

@@ -8,7 +8,7 @@ import time
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
-from app.queue.factory import get_queue_client
+from app.queue.factory import get_queue_client, get_retry_queue_client
 from app.services.scheduler_service import SchedulerService
 from app.services.worker_service import WorkerService
 
@@ -64,6 +64,7 @@ def run_worker() -> None:
     configure_logging(level=settings.log_level)
 
     queue_client = get_queue_client()
+    retry_queue_client = get_retry_queue_client()
 
     while True:
         messages = queue_client.receive_tasks(max_messages=1, wait_time_seconds=10)
@@ -74,10 +75,12 @@ def run_worker() -> None:
             try:
                 payload = json.loads(message.body)
                 task_id = payload.get("task_id")
-                # TODO: 
-                # 當 worker 一多，每個 worker 都跟唯一的 DB 建立連線，同時還有 scheduler 跟 api server，會造成 connection pool 很快就用光。
                 with SessionLocal() as db:
-                    service = WorkerService(db, queue_client)
+                    service = WorkerService(
+                        db, queue_client,
+                        worker_id=settings.worker_id,
+                        retry_queue=retry_queue_client,
+                    )
                     service.process_task_id(task_id)
                 
                 queue_client.delete_message(message.receipt_handle)

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.models.task import Task
-from app.queue.factory import get_queue_client
+from app.queue.factory import get_retry_queue_client
 from app.repositories.task_repository import TaskRepository
 from app.schemas.task import RetryResponse
 
@@ -47,7 +47,7 @@ def retry_task(task_id: str, db: Session = Depends(get_db)):
 
     retry_task = repo.create(retry_task)
 
-    queue_client = get_queue_client()
+    queue_client = get_retry_queue_client()
     queue_client.send_task(str(retry_task.id))
 
     return RetryResponse(
