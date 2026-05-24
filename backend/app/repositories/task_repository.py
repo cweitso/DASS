@@ -116,4 +116,17 @@ class TaskRepository:
         stmt = select(Task).where(Task.status == 'running', Task.locked_until.is_not(None), Task.locked_until < now)
         return list(self.db.scalars(stmt).all())
     
-    
+    def get_container_spec(self, task_id: str) -> dict | None: # 取得 Task 對應的 Container Spec
+        
+        stmt = (
+            select(Job.action_config)
+            .select_from(Task)
+            .join(Job, Task.job_id == Job.id)
+            .where(
+                Task.id == task_id,
+                Job.action_type == "container" 
+            )
+        )
+        
+        # 執行查詢。如果找到，回傳原生的 dict；找不到或非 container，回傳 None
+        return self.db.execute(stmt).scalar_one_or_none()
