@@ -58,8 +58,8 @@ class JobRepository:
 
     def due_jobs(self, now: datetime) -> list[Job]:
         
-        # 1. 建立查詢語句：選擇 Job -> 加入過濾條件 -> 加入排序
-        stmt = select(Job).where(Job.enabled == True, Job.next_fire_at <= now ).order_by(Job.next_fire_at.asc())
+        # 1. 建立查詢語句：選擇 Job -> 加入過濾條件 -> 加入排序 , 5/24 補上鎖定定時任務，排除非定時任務
+        stmt = select(Job).where(Job.job_type == "scheduled", Job.enabled == True, Job.next_fire_at <= now ).order_by(Job.next_fire_at.asc())
         
         result = self.db.execute(stmt)
         return result.scalars().all()
