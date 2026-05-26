@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     queue_backend: Literal["sqs", "memory"] = "sqs"
     queue_name: str = "dass-tasks"
     queue_name_normal: str = "dass-tasks-normal"
+    queue_name_scheduled: str = "dass-tasks-scheduled"
     queue_name_retry: str = "dass-tasks-retry"
     aws_region: str = "us-east-1"
     aws_access_key_id: str = Field(default="dass")
@@ -36,7 +37,9 @@ class Settings(BaseSettings):
 
     scheduler_interval_seconds: int = 5
     scheduler_locked_task_scan_seconds: int = 5
-    worker_visibility_timeout_seconds: int = 300
+    # 短 visibility + worker 端 heartbeat 動態延長；長 job 也安全，crash 時 30s 內可被 reclaim。
+    worker_visibility_timeout_seconds: int = 30
+    autoscaler_interval_seconds: int = 30
     worker_id: str = "worker"
     task_timeout_seconds: int = 300
     shell_execution_enabled: bool = True
