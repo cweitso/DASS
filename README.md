@@ -38,10 +38,12 @@ The frontend serves the UI and proxies API calls to the backend. The backend own
 
 ```text
 dass/
-  backend/       # FastAPI app, scheduler, worker, models, services
+  backend/       # FastAPI app, scheduler, worker, autoscaler, models, services
   frontend/      # Next.js dashboard (placeholder UI, to be implemented)
-  infra/         # LocalStack init scripts
+  infra/         # LocalStack, PostgreSQL (primary/replica), observability configs
+  scripts/       # load_gen.py (stress), run_integration_tests.sh, e2e_smoke.py
   docker-compose.yml
+  docker-compose.observability.yml   # Prometheus + Grafana overlay
   docker-compose.local.yml
   .env.example
   README.md
@@ -138,6 +140,117 @@ Workers are horizontally scalable:
 ```bash
 docker compose up --scale worker=3
 ```
+
+## Autoscaling
+
+An `autoscaler` service watches queue depth and spawns/reaps extra `worker` containers on the host Docker daemon. Autoscaled workers carry the label `com.dass.autoscaled=true`, which is how scale-down (and the cleanup command below) tells them apart from the baseline worker. Tune the loop with `DASS_AUTOSCALER_INTERVAL_SECONDS` (default `30`).
+
+If a load test leaves autoscaled workers behind, kill **just those** — the base stack (DB, queue, API) is untouched:
+
+```bash
+docker ps -q --filter "label=com.dass.autoscaled=true" | xargs -r docker kill
+```
+
+> `docker ps -q | xargs -r docker kill` (no filter) stops **every** running container, including your DB, queue, and Grafana. Use it only for a deliberate hard reset.
+
+## Observability (Prometheus + Grafana)
+
+The metrics stack (Prometheus, Grafana, cAdvisor, postgres-exporter, custom sqs-exporter) lives in a separate overlay so the dev stack stays lean — bring it up only when you want to watch a load test:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+| Tool | URL | Notes |
+|------|-----|-------|
+| Grafana | http://localhost:3001 | Dashboard **DASS · Overview** at `/d/dass-overview`; anonymous admin (dev only) |
+| Prometheus | http://localhost:9090 | Raw metrics + query UI |
+| cAdvisor | http://localhost:8081 | Per-container CPU / memory |
+
+Tear it down, including the metrics volumes:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml down -v
+```
+
+## Load / Stress Testing
+
+`scripts/load_gen.py` drives real HTTP traffic through the full API → JobService → repository → DB → queue path (not direct DB inserts), so queue depth, worker throughput, and DB pressure react for real. Run it with the backend's virtualenv, where `httpx` is installed:
+
+```bash
+cd backend   # so the project .venv (with httpx) is used
+.venv/bin/python ../scripts/load_gen.py --count 10000 --concurrency 64 --trigger
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--count N` | number of jobs to create (default 1000) |
+| `--concurrency N` | parallel in-flight HTTP requests (default 32) |
+| `--trigger` | after creating, fire each job once via `/trigger` |
+| `--api URL` | API base URL (default `http://localhost:8000`) |
+
+Bring up the observability overlay first to watch it live at `/d/dass-overview`.
+
+## Testing
+
+### Unit tests
+
+Unit tests use an in-memory SQLite database and a memory queue — **no Docker, no PostgreSQL, no env setup**. The `tests/integration` directory is auto-excluded via `pyproject.toml`.
+
+```bash
+cd backend
+uv run pytest            # or: .venv/bin/pytest
+```
+
+### Integration tests
+
+Integration tests need real PostgreSQL + LocalStack. `scripts/run_integration_tests.sh` side-cars two throwaway Postgres containers (`dass_test` on :5432, `dass_scheduler` on :5433), runs migrations, and reuses the compose stack's LocalStack on :4566. Each test runs inside a transaction that is rolled back, so DB state stays clean between runs.
+
+```bash
+# LocalStack must be reachable first
+docker compose up -d localstack
+
+scripts/run_integration_tests.sh                 # bring up test DBs (if needed) + run pytest
+scripts/run_integration_tests.sh up              # bring up + migrate only, skip pytest
+scripts/run_integration_tests.sh down            # tear down the test DBs
+scripts/run_integration_tests.sh test -k retry   # extra args pass through to pytest
+```
+
+Test containers stay running between invocations for fast iteration — run `... down` when you're finished.
+
+### Running CI workflows locally (`act`)
+
+CI runs two workflows: `backend-ci.yml` (unit tests, no Docker) and `integration-ci.yml` (integration tests, real Postgres + LocalStack). You can reproduce them locally with [`act`](https://nektosact.com). The repo's `.actrc` and `.actignore` are auto-loaded — they point `--env-file` at `/dev/null` so your local `.env` can't shadow the workflow's own `env:` block. Since `.actrc` pins no runner image, pass one with `-P`.
+
+**Unit workflow** — no service containers, so it runs anytime (even with the dev stack up). Its jobs are gated by PR-title tags, so feed a fake event whose title contains `[all]` to trigger them all:
+
+```bash
+echo '{"pull_request": {"title": "[all] local ci"}}' > /tmp/pr-event.json
+
+act pull_request \
+  -W .github/workflows/backend-ci.yml \
+  -e /tmp/pr-event.json \
+  -P ubuntu-latest=catthehacker/ubuntu:act-latest
+```
+
+**Integration workflow** — `act` uses your host Docker daemon, and this workflow publishes a LocalStack service container on host port **4566**, which the dev stack's own LocalStack already owns. Bring the dev stack down first to free the port (and avoid `act` grabbing the wrong LocalStack container), then restore it afterward:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml down
+
+act workflow_dispatch \
+  -W .github/workflows/integration-ci.yml \
+  -P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# bring the dev stack back up when done
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+`workflow_dispatch` is used so the run isn't gated by a PR title. The integration tests run in the **Run integration tests** step — that's where pass/xfail/fail shows up.
+
+> The final **Upload test results** step (`actions/upload-artifact@v4`) fails under `act` with `Unable to get the ACTIONS_RUNTIME_TOKEN env variable`. This is harmless — artifact upload needs the GitHub-hosted artifact service, which `act` doesn't provide by default; your tests have already run by then. To silence it, add `--artifact-server-path /tmp/act-artifacts` to the `act` command.
+
+> If you only want to *run* the integration tests (not exercise the workflow YAML), `scripts/run_integration_tests.sh` is simpler — it coexists with the running dev stack and reuses its LocalStack, so no port juggling.
 
 ## API Endpoints
 
