@@ -92,7 +92,7 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
     )
     main_db.flush()
 
-    service = SchedulerService(main_db, sqs)
+    service = SchedulerService(main_db, sqs, sqs)
     dispatched = service.dispatch_due_jobs()
     assert dispatched >= 1
 
@@ -122,45 +122,26 @@ def test_worker_atomic_claim_on_postgres(main_db, make_job, make_task):
     assert sum(1 for r in results if r is not None) == 1
 
 
-def test_worker_executes_and_marks_result(main_db, make_job, make_task, monkeypatch):
+def test_worker_executes_and_marks_result(main_db, make_job, make_task):
+    # S4: ExecutionService 只剩 docker subprocess（沒有 httpx 路徑）；mock 改成注入 executor，
+    # 避免在整合測試裡真的去拉 alpine image 跑 container — 我們要驗的是 worker 流程 + DB 狀態，
+    # 不是 docker 本身。
     from app.queue.memory import MemoryQueueClient
+    from app.services.execution_service import ExecutionResult
     from app.services.worker_service import WorkerService
 
-    job = make_job(
-        name="integ-exec",
-        action_type="http",
-        action_config={
-            "method": "GET",
-            "url": "https://httpbin.org/get",
-            "timeout_seconds": 5,
-            "headers": {},
-        },
-    )
+    job = make_job(name="integ-exec")
     task = make_task(job.id, status="pending")
     main_db.flush()
 
-    # mock HTTP to avoid external dependency
-    class DummyResponse:
-        is_success = True
-        status_code = 200
-        text = "ok"
-
-    class DummyClient:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def request(self, *a, **kw):
-            return DummyResponse()
-
-    monkeypatch.setattr(
-        "app.services.execution_service.httpx.Client", lambda timeout: DummyClient()
-    )
-
     queue = MemoryQueueClient()
     service = WorkerService(main_db, queue, "ci-worker")
+
+    class SuccessExecutor:
+        def run(self, *a, **kw):
+            return ExecutionResult(success=True, stdout="ok", stderr="")
+
+    service.executor = SuccessExecutor()
     result = service.process_task_id(str(task.id))
 
     assert result is True
@@ -211,7 +192,7 @@ def test_orphan_recovery_on_real_postgres(main_db, make_job, purge_queues):
     main_db.flush()
 
     queue = MemoryQueueClient()
-    service = SchedulerService(main_db, queue)
+    service = SchedulerService(main_db, queue, queue)
     recovered = service.recover_orphans()
 
     assert recovered >= 1
@@ -233,7 +214,7 @@ def test_api_job_crud_on_postgres(main_db, monkeypatch):
         finally:
             pass
 
-    monkeypatch.setattr("app.api.v1.jobs.get_queue_client", lambda: MemoryQueueClient())
+    monkeypatch.setattr("app.api.v1.jobs.get_normal_queue_client", lambda: MemoryQueueClient())
     monkeypatch.setattr("app.api.v1.tasks.get_retry_queue_client", lambda: MemoryQueueClient())
     app.dependency_overrides[get_db] = override_get_db
 
@@ -287,7 +268,7 @@ def test_dual_write_api_to_scheduler_db(main_db, scheduler_db, monkeypatch):
         finally:
             pass
 
-    monkeypatch.setattr("app.api.v1.jobs.get_queue_client", lambda: MemoryQueueClient())
+    monkeypatch.setattr("app.api.v1.jobs.get_normal_queue_client", lambda: MemoryQueueClient())
     monkeypatch.setattr("app.api.v1.tasks.get_retry_queue_client", lambda: MemoryQueueClient())
     app.dependency_overrides[get_db] = override_get_db
 

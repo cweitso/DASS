@@ -81,6 +81,13 @@ def sqs_client():
 
 @pytest.fixture
 def purge_queues(sqs_client):
+    """Drain (not purge) all dass queues until empty.
+
+    AWS doc / LocalStack: `purge_queue` is async — messages sent up to 60s after
+    a purge call may also get swept. Tests that purge then immediately send a
+    new message hit this race. Draining is synchronous: when this fixture yields
+    the queue is verifiably empty, and any subsequent send is safe.
+    """
     queue_names = [
         os.environ.get("DASS_QUEUE_NAME", "dass-tasks"),
         os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
@@ -91,12 +98,19 @@ def purge_queues(sqs_client):
     for name in queue_names:
         try:
             url = sqs_client.get_queue_url(QueueName=name)["QueueUrl"]
-            sqs_client.purge_queue(QueueUrl=url)
-        except botocore.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "AWS.SimpleQueueService.PurgeQueueInProgress":
-                pass  # 60s cooldown between purges — acceptable
-            else:
-                raise
+        except botocore.exceptions.ClientError:
+            continue
+        while True:
+            resp = sqs_client.receive_message(
+                QueueUrl=url,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=0,
+            )
+            messages = resp.get("Messages", [])
+            if not messages:
+                break
+            for m in messages:
+                sqs_client.delete_message(QueueUrl=url, ReceiptHandle=m["ReceiptHandle"])
     yield
 
 
@@ -116,6 +130,12 @@ def make_job(main_db):
                     "timeout_seconds": 5,
                     "headers": {},
                 },
+            ),
+            # S4: WorkerService._execute_job 需要 runtime_spec 才能 build ContainerSpec；
+            # 不給的話 ContainerSpec(**{}) 會在 image 缺失時噴 TypeError，executor 永遠跑不到
+            runtime_spec=overrides.get(
+                "runtime_spec",
+                {"image": "alpine:3", "command": ["true"], "env": {}, "timeout_seconds": 1},
             ),
             enabled=overrides.get("enabled", True),
             concurrency_policy=overrides.get("concurrency_policy", "allow"),

@@ -9,7 +9,6 @@ from sqlalchemy.orm import sessionmaker
 from app.db.base import Base
 from app.main import app
 from app.api.deps import get_db
-from app.queue.factory import get_queue_client
 from app.queue.memory import MemoryQueueClient
 
 
@@ -43,7 +42,7 @@ def client(db_session, monkeypatch):
         finally:
             pass
 
-    monkeypatch.setattr("app.api.v1.jobs.get_queue_client", lambda: MemoryQueueClient())
+    monkeypatch.setattr("app.api.v1.jobs.get_normal_queue_client", lambda: MemoryQueueClient())
     monkeypatch.setattr("app.api.v1.tasks.get_retry_queue_client", lambda: MemoryQueueClient())
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
