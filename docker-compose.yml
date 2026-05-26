@@ -121,16 +121,21 @@ services:
       com.dass.project: dass
       com.dass.service: scheduler
 
-  scheduler_standby:
+  autoscaler:
     build:
       context: ./backend
       dockerfile: Dockerfile.scheduler
+    command: ["python", "-m", "app.cli", "autoscaler"]
     env_file:
       - .env
     environment:
       DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
-      DASS_WORKER_ID: ${DASS_WORKER_ID:-scheduler-standby}
+      DASS_WORKER_ID: ${DASS_WORKER_ID:-autoscaler}
+    # S5: VMService spawns sibling worker containers via host docker daemon.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,7 +146,7 @@ services:
       - dass-net
     labels:
       com.dass.project: dass
-      com.dass.service: scheduler-standby
+      com.dass.service: autoscaler
 
   worker:
     build:
@@ -154,6 +159,9 @@ services:
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-worker}
+    # S4: worker 透過 host docker daemon 起 job container；需要把 docker.sock mount 進來。
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

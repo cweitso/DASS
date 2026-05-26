@@ -19,6 +19,7 @@ dependencies = [
   "httpx>=0.27.0",
   "croniter>=2.0.5",
   "python-json-logger>=2.0.7",
+  "docker>=7.1.0",
 ]
 
 [project.optional-dependencies]
@@ -42,5 +43,8 @@ markers = [
   "integration: 整合測試 — 需要 Docker services (PostgreSQL + LocalStack)",
 ]
 # 預設跑 unit test 時忽略 integration 目錄，避免本地缺 Docker 爆掉
-addopts = "--ignore=tests/integration"
+# -v：列出每個 test 名稱與結果
+# --durations=10：顯示最慢的 10 個 test，方便抓瓶頸
+# -ra：在結尾彙整 failures/errors/skips 的原因
+addopts = "--ignore=tests/integration -v --durations=10 -ra"
 
