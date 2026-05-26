@@ -111,7 +111,7 @@ jobs:
       - run: uv run pytest tests/test_api.py -v
 
   test-execution-service:
-    name: Test / ExecutionService (HTTP & Shell)
+    name: Test / ExecutionService & Cron (Container Execution)
     needs: changes
     runs-on: ubuntu-latest
     if: |
@@ -124,7 +124,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_execution_service.py -v
+      - run: uv run pytest tests/test_execution_service.py tests/test_cron.py -v
 
   test-scheduler:
     name: Test / Scheduler (Dispatch & Orphan Recovery)

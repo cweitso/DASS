@@ -177,17 +177,10 @@ jobs:
           echo "| Status | Count | Description |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| Passed | $PASSED | ✅ passed |" >> $GITHUB_STEP_SUMMARY
-          echo "| XFail | $XFAILED | ⏳ S4 feature not yet implemented |" >> $GITHUB_STEP_SUMMARY
+          echo "| XFail | $XFAILED | ⏳ feature not yet implemented |" >> $GITHUB_STEP_SUMMARY
           echo "| XPass | $XPASSED | 🎉 feature landed, test now passes |" >> $GITHUB_STEP_SUMMARY
           echo "| Failed | $FAILED | ❌ regression |" >> $GITHUB_STEP_SUMMARY
           echo "| Error | $ERRORS | 💥 test setup error |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "_Sprint 4 done when XFail = 0 and all tests pass_" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: integration-test-results
-          path: backend/integration-results.txt
-          retention-days: 14
+          
