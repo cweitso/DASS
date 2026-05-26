@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.queue.factory import get_queue_client
+from app.queue.factory import get_normal_queue_client
 from app.schemas.job import (
     ActionType,
     ConcurrencyPolicy,
@@ -131,12 +131,12 @@ def trigger_job(
 ):
     """手動觸發 Job 執行。
 
-    1. queue = get_queue_client()
+    1. queue = get_normal_queue_client()  # S4: API immediate trigger → normal queue
     2. task = service.trigger_job(job_id, queue)
     3. 回傳 TriggerResponse(task_id=str(task.id), status=task.status)
     """
 
-    queue = get_queue_client()
+    queue = get_normal_queue_client()
     task = service.trigger_job(job_id, queue)
 
     return TriggerResponse(task_id=str(task.id), status=task.status)

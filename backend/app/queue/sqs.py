@@ -44,6 +44,8 @@ class SQSQueueClient:
 
     def receive_tasks(self, max_messages: int = 1, wait_time_seconds: int = 10) -> list[QueueMessage]:
         # Long polling: SQS waits up to wait_time_seconds for a message.
+        # 短 visibility + worker 端 heartbeat 動態延長：crash 時 SQS message 很快回到可見狀態，
+        # scheduler.recover_orphans 也只要等 DB lock 過期（同樣 30s 等級）就能 reclaim
         response = self.client.receive_message(
             QueueUrl=self.queue_url,
             MaxNumberOfMessages=max_messages,
@@ -57,3 +59,10 @@ class SQSQueueClient:
 
     def delete_message(self, receipt_handle: str) -> None:
         self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+
+    def change_message_visibility(self, receipt_handle: str, visibility_seconds: int) -> None:
+        self.client.change_message_visibility(
+            QueueUrl=self.queue_url,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=visibility_seconds,
+        )

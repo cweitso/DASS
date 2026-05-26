@@ -15,27 +15,35 @@ logger = logging.getLogger(__name__)
 
 
 class SchedulerService:
-    def __init__(self, db: Session, queue_client, worker_visibility_timeout_seconds: int = 300):
+    # S4 後 queue 拆成 normal/scheduled/retry，本 class 持有前兩條；retry queue 由 worker 端負責
+    def __init__(
+        self,
+        db: Session,
+        normal_queue_client,
+        scheduled_queue_client,
+        worker_visibility_timeout_seconds: int = 300,
+    ):
         self.db = db
         self.jobs = JobRepository(db)
         self.tasks = TaskRepository(db)
-        self.queue = queue_client
+        self.normal_queue = normal_queue_client
+        self.scheduled_queue = scheduled_queue_client
         self.worker_visibility_timeout_seconds = worker_visibility_timeout_seconds
 
     def recover_orphans(self) -> int:
-        """回收所有 locked_until 過期的 running Task：重設為 pending 並重送 Queue。
-        #   1. 取得當前時間
-        #   2. 用 self.tasks.list_expired_running(now) 找到過期的 task
-        #   3. 對每個 task：mark_running_expired_pending → send_task
-        #   4. 回傳回收的數量
-        # TODO:
-        #   改為 concurrent recovery?
+        """回收所有 locked_until 過期的 running Task：把 status 改回 pending。
+
+        不需要重送 message：worker 端 heartbeat 同步延長 SQS visibility 與 DB locked_until，
+        兩者會一起過期。SQS visibility 過期後 message 自動 visible，會被下個 worker 撈到。
+        此處只負責讓 atomic claim（WHERE status='pending'）能再次成功。
+
+        若 heartbeat 異常導致 DB lock 過期但 SQS visibility 仍活，避免雙路徑造成
+        duplicate execution——所以這裡不主動 resend。
         """
         now = utcnow()
         tasks = self.tasks.list_expired_running(now)
         for task in tasks:
             self.tasks.mark_running_expired_pending(task)
-            self.queue.send_task(str(task.id))
         return len(tasks)
 
 
@@ -65,7 +73,7 @@ class SchedulerService:
         #   3. self.tasks.create(task)
         #   4. 更新 job.next_fire_at = next_cron_time(...)
         #   5. self.jobs.update(job)
-        #   6. self.queue.send_task(str(task.id))
+        #   6. self.scheduled_queue.send_task(str(task.id))   # S4: 排程派發送到 scheduled queue
         #   7. 回傳 True
         """
         job.next_fire_at = next_cron_time(job.cron_expression, now)
@@ -74,6 +82,7 @@ class SchedulerService:
             return False
         task = Task(job_id=str(job.id), status="pending", trigger_type="scheduled", retry_count=0)
         self.tasks.create(task)
-        self.queue.send_task(str(task.id))
+        # S4: 原本是 self.queue.send_task(...)；scheduler 派發專送 scheduled queue
+        self.scheduled_queue.send_task(str(task.id))
         return True
-        
+

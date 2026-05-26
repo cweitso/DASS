@@ -17,12 +17,16 @@ def get_normal_queue_client() -> QueueClient:
 
 
 @lru_cache
+def get_scheduled_queue_client() -> QueueClient:
+    settings = get_settings()
+    if settings.queue_backend == "memory":
+        return MemoryQueueClient()
+    return SQSQueueClient(settings, queue_name=settings.queue_name_scheduled)
+
+
+@lru_cache
 def get_retry_queue_client() -> QueueClient:
     settings = get_settings()
     if settings.queue_backend == "memory":
         return MemoryQueueClient()
     return SQSQueueClient(settings, queue_name=settings.queue_name_retry)
-
-
-# backward-compat alias — callers that import get_queue_client get the normal queue
-get_queue_client = get_normal_queue_client

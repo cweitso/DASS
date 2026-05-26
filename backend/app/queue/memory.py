@@ -34,3 +34,7 @@ class MemoryQueueClient:
     def delete_message(self, receipt_handle: str) -> None:
         # No-op: the in-memory queue removes items on get().
         return None
+
+    def change_message_visibility(self, receipt_handle: str, visibility_seconds: int) -> None:
+        # No-op: in-memory queue has no visibility semantics.
+        return None
