@@ -15,18 +15,22 @@ settings = get_settings()
 # ==========================================
 # Primary引擎 - 負責寫入
 primary_engine = create_engine(
-    settings.database_url, 
-    echo=settings.database_echo, 
+    settings.database_url,
+    echo=settings.database_echo,
     pool_pre_ping=True
 )
 
 # Replica引擎 - 負責讀取
 # 防呆機制：如果 .env 沒設定 Replica 網址，就退回使用 Primary (單機模式備援)
 replica_url = settings.replica_database_url or settings.database_url
+# S4: 加 connect_timeout=2+ pool_timeout=2，避免 replica 死掉時健康檢查 TCP SYN 卡 75s
+# 把 API 整個 hang 住。psycopg 走 libpq option 鍵名 connect_timeout
 replica_engine = create_engine(
-    replica_url, 
-    echo=settings.database_echo, 
-    pool_pre_ping=True
+    replica_url,
+    echo=settings.database_echo,
+    pool_pre_ping=True,
+    pool_timeout=2,
+    connect_args={"connect_timeout": 2},
 )
 
 # ==========================================
@@ -38,6 +42,11 @@ class RoutingSession(Session):
         這個方法是 SQLAlchemy 的「交通警察」。
         每次要執行 SQL 語法前，都會先跑來這裡問：「我該走哪一條連線？」
         """
+        # 情境 0 (S4 加)：呼叫端開了 force_primary 旗標 → 所有讀寫一律走 Primary。
+        # 用於 worker 這種「寫完馬上要讀回來」的路徑，避免撞到 replica lag。
+        if self.info.get("force_primary"):
+            return primary_engine
+
         # 情境 A：當 SQLAlchemy 正在打包準備寫入 (Insert/Update/Delete) 時 -> Primary
         if self._flushing:
             return primary_engine
