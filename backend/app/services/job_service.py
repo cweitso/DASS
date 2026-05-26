@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from croniter import croniter
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -11,6 +13,52 @@ from app.repositories.task_repository import TaskRepository
 from app.schemas.job import HttpActionConfig, JobCreate, JobUpdate, ShellActionConfig
 from app.utils.cron import next_cron_time
 from app.utils.time import utcnow
+
+
+# S4: 給 action_type 對應的 base image。內部 scheduler，固定鏡像即可
+_SHELL_IMAGE = "alpine:3"
+_HTTP_IMAGE = "curlimages/curl:8.6.0"
+
+
+def _build_runtime_spec(action_type: str, action_config: dict) -> dict:
+    """把 user-facing action_config 翻成 worker 可直接 docker run 的 ContainerSpec dict。
+
+    Worker 端的 ExecutionService 吃 ContainerSpec(**spec_data)，所以這裡產生的 keys
+    必須跟 dataclass 對齊：image / command / env / timeout_seconds (+ optional cpu / memory_mb / working_dir)。
+    """
+    if action_type == "shell":
+        return {
+            "image": _SHELL_IMAGE,
+            "command": ["sh", "-c", action_config["command"]],
+            "env": {},
+            "timeout_seconds": int(action_config.get("timeout_seconds", 30)),
+        }
+
+    if action_type == "http":
+        method = str(action_config.get("method", "GET")).upper()
+        url = action_config["url"]
+        headers = action_config.get("headers") or {}
+        body = action_config.get("body")
+
+        cmd: list[str] = ["curl", "-fsS", "-X", method]
+        for k, v in headers.items():
+            cmd.extend(["-H", f"{k}: {v}"])
+        if body is not None:
+            body_str = json.dumps(body) if isinstance(body, (dict, list)) else str(body)
+            cmd.extend(["-d", body_str])
+        cmd.append(url)
+
+        return {
+            "image": _HTTP_IMAGE,
+            "command": cmd,
+            "env": {},
+            "timeout_seconds": int(action_config.get("timeout_seconds", 30)),
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=f"Unsupported action_type: {action_type}",
+    )
 
 
 class JobService:
@@ -45,6 +93,8 @@ class JobService:
             cron_expression=payload.cron_expression,
             action_type=payload.action_type,
             action_config=payload.action_config,
+            # S4: 同時填 runtime_spec 給 worker 直接吃
+            runtime_spec=_build_runtime_spec(payload.action_type, payload.action_config),
             enabled=payload.enabled,
             concurrency_policy=payload.concurrency_policy,
             max_retries=payload.max_retries,
@@ -127,6 +177,10 @@ class JobService:
             setattr(job, key, value)
         if payload.cron_expression:
             job.next_fire_at = next_cron_time(payload.cron_expression, utcnow())
+
+        # S4: action_type / action_config 任何一個動過都要同步 runtime_spec。
+        if "action_type" in data or "action_config" in data:
+            job.runtime_spec = _build_runtime_spec(action_type, action_config)
 
         return self.jobs.update(job)
 
