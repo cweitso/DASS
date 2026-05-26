@@ -1,0 +1,239 @@
+{
+  "uid": "dass-overview",
+  "title": "DASS · Overview",
+  "tags": ["dass"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {"from": "now-15m", "to": "now"},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Jobs in DB",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_jobs_total_count", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "type": "stat",
+      "title": "Tasks pending",
+      "id": 2,
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(dass_tasks_by_status_count{status=\"pending\"}) or vector(0)", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color":"green","value":null},{"color":"orange","value":1000},{"color":"red","value":10000}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Tasks running",
+      "id": 3,
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(dass_tasks_by_status_count{status=\"running\"}) or vector(0)", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "type": "stat",
+      "title": "SQS in-flight (all queues)",
+      "id": 4,
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(dass_sqs_messages_not_visible)", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "type": "stat",
+      "title": "Success/min",
+      "id": 5,
+      "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_tasks_recent_throughput_success_per_min", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode":"fixed","fixedColor":"green"}}}
+    },
+    {
+      "type": "stat",
+      "title": "Failed/min",
+      "id": 6,
+      "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_tasks_recent_throughput_failed_per_min", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode":"fixed","fixedColor":"red"}}}
+    },
+
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Queue depth",
+      "gridPos": {"x": 0, "y": 4, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "SQS visible messages",
+      "id": 10,
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_sqs_messages_visible", "legendFormat": "{{queue}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "SQS in-flight messages",
+      "id": 11,
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_sqs_messages_not_visible", "legendFormat": "{{queue}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+    },
+
+    {
+      "type": "row",
+      "id": 104,
+      "title": "Worker fleet (autoscaling)",
+      "gridPos": {"x": 0, "y": 13, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker containers running",
+      "id": 50,
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "dass_workers_total", "legendFormat": "total", "refId": "A"},
+        {"expr": "dass_workers_autoscaled", "legendFormat": "autoscaled", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"fillOpacity": 25, "showPoints": "always", "lineWidth": 2, "drawStyle": "line"}}},
+      "options": {"legend": {"showLegend": true, "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Workers now",
+      "id": 51,
+      "gridPos": {"x": 12, "y": 14, "w": 6, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_workers_total", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color":"blue","value":null},{"color":"green","value":2},{"color":"orange","value":7},{"color":"red","value":10}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Autoscaled (extra)",
+      "id": 52,
+      "gridPos": {"x": 18, "y": 14, "w": 6, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_workers_autoscaled", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color":"green","value":null},{"color":"orange","value":5},{"color":"red","value":9}]}}}
+    },
+
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Task pipeline",
+      "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Tasks by status (DB snapshot)",
+      "id": 20,
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "dass_tasks_by_status_count", "legendFormat": "{{status}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 30, "showPoints": "never", "stacking": {"mode": "normal", "group": "A"}}}},
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput (per minute)",
+      "id": 21,
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "dass_tasks_recent_throughput_success_per_min", "legendFormat": "success/min", "refId": "A"},
+        {"expr": "dass_tasks_recent_throughput_failed_per_min", "legendFormat": "failed/min", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "placement": "bottom"}}
+    },
+
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Postgres pressure",
+      "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Postgres connections (by state)",
+      "id": 30,
+      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "pg_stat_activity_count{datname=\"dass\"}", "legendFormat": "{{state}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Postgres txn rate (commits + rollbacks /s)",
+      "id": 31,
+      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "rate(pg_stat_database_xact_commit{datname=\"dass\"}[30s])", "legendFormat": "commit/s", "refId": "A"},
+        {"expr": "rate(pg_stat_database_xact_rollback{datname=\"dass\"}[30s])", "legendFormat": "rollback/s", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "placement": "bottom"}}
+    },
+
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Container resources",
+      "gridPos": {"x": 0, "y": 40, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU usage % per dass container",
+      "id": 40,
+      "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"dass_alt-.+\"}[30s])) * 100",
+        "legendFormat": "{{name}}",
+        "refId": "A"
+      }],
+      "fieldConfig": {"defaults": {"unit": "percent", "custom": {"fillOpacity": 15, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory MB per dass container",
+      "id": 41,
+      "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "container_memory_usage_bytes{name=~\"dass_alt-.+\"} / 1024 / 1024",
+        "legendFormat": "{{name}}",
+        "refId": "A"
+      }],
+      "fieldConfig": {"defaults": {"unit": "decmbytes", "custom": {"fillOpacity": 15, "showPoints": "never"}}},
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"]}}
+    }
+  ]
+}

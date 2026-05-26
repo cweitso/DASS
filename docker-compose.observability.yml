@@ -1,0 +1,124 @@
+# Observability overlay — Prometheus + Grafana + cAdvisor + postgres-exporter
+# + custom sqs-exporter.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Ports:
+#   Grafana:    http://localhost:3001  (anonymous admin enabled for dev)
+#   Prometheus: http://localhost:9090
+#   cAdvisor:   http://localhost:8081  (raw container metrics UI)
+#
+# Why a separate file: the dev stack stays lean. Bring observability up only
+# when you want to watch a load test.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - dass-prometheus-data:/prometheus
+    networks:
+      - dass-net
+    restart: unless-stopped
+    labels:
+      com.dass.project: dass
+      com.dass.service: prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3001:3000"
+    environment:
+      # Dev convenience: no login, full admin. Don't do this in prod.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: "dark"
+    volumes:
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - dass-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - dass-net
+    restart: unless-stopped
+    labels:
+      com.dass.project: dass
+      com.dass.service: grafana
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    ports:
+      - "8081:8080"
+    networks:
+      - dass-net
+    restart: unless-stopped
+    labels:
+      com.dass.project: dass
+      com.dass.service: cadvisor
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://dass:dass@postgres:5432/dass?sslmode=disable"
+      PG_EXPORTER_EXTEND_QUERY_PATH: /custom-queries.yaml
+      PG_EXPORTER_DISABLE_DEFAULT_METRICS: "false"
+    volumes:
+      - ./infra/observability/postgres-exporter/queries.yaml:/custom-queries.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dass-net
+    restart: unless-stopped
+    labels:
+      com.dass.project: dass
+      com.dass.service: postgres-exporter
+
+  sqs-exporter:
+    build:
+      context: ./infra/observability/sqs-exporter
+    environment:
+      DASS_SQS_ENDPOINT_URL: http://localstack:4566
+      DASS_AWS_REGION: us-east-1
+      DASS_AWS_ACCESS_KEY_ID: dass
+      DASS_AWS_SECRET_ACCESS_KEY: dass
+      DASS_SQS_EXPORTER_INTERVAL: "3"
+    # S5: also polls docker daemon for the worker fleet size → dass_workers_*
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - dass-net
+    restart: unless-stopped
+    labels:
+      com.dass.project: dass
+      com.dass.service: sqs-exporter
+
+volumes:
+  dass-prometheus-data:
+  dass-grafana-data:
+
+networks:
+  dass-net:
+    driver: bridge

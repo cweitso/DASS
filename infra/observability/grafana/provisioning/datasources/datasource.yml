@@ -1,0 +1,17 @@
+apiVersion: 1
+
+# Pin Prometheus datasource UID so dashboard JSON can reference it portably.
+# Without an explicit uid, Grafana auto-generates one per install, and any
+# dashboard that hardcoded "uid": "prometheus" finds nothing → empty panels.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

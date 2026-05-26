@@ -1,0 +1,52 @@
+# Application-level Postgres metrics for DASS. Joined with system-level metrics
+# from postgres_exporter's defaults (connections, transactions, etc.).
+
+dass_tasks_by_status:
+  query: |
+    SELECT status, count(*)::float AS count
+    FROM tasks
+    GROUP BY status
+  master: true
+  metrics:
+    - status:
+        usage: "LABEL"
+        description: "Task status"
+    - count:
+        usage: "GAUGE"
+        description: "Number of tasks currently in this status"
+
+dass_tasks_recent_throughput:
+  query: |
+    SELECT
+      COALESCE(SUM(CASE WHEN status='success' AND finished_at > NOW() - INTERVAL '1 minute' THEN 1 ELSE 0 END), 0)::float AS success_per_min,
+      COALESCE(SUM(CASE WHEN status IN ('failed','final_failed') AND finished_at > NOW() - INTERVAL '1 minute' THEN 1 ELSE 0 END), 0)::float AS failed_per_min
+    FROM tasks
+  master: true
+  metrics:
+    - success_per_min:
+        usage: "GAUGE"
+        description: "Tasks succeeded in the last minute"
+    - failed_per_min:
+        usage: "GAUGE"
+        description: "Tasks failed (including final_failed) in the last minute"
+
+dass_jobs_total:
+  query: "SELECT count(*)::float AS count FROM jobs"
+  master: true
+  metrics:
+    - count:
+        usage: "GAUGE"
+        description: "Total jobs"
+
+dass_jobs_by_enabled:
+  query: |
+    SELECT enabled::text AS enabled, count(*)::float AS count
+    FROM jobs
+    GROUP BY enabled
+  master: true
+  metrics:
+    - enabled:
+        usage: "LABEL"
+    - count:
+        usage: "GAUGE"
+        description: "Jobs by enabled flag"
