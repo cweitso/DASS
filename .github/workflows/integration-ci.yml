@@ -2,24 +2,26 @@
 # integration-ci.yml — integration tests (Sprint 4)
 # ============================================================
 # Runs cross-module tests in real Docker (PostgreSQL + LocalStack SQS).
-# Triggers: push to main/develop, any PR touching backend paths, workflow_dispatch.
+# Triggers: every PR — except changes touching only docs / editor config.
+# PR-only workflow: main is updated only via merged PRs, so no push trigger.
+# Runs in parallel with backend-ci.yml.
 # xfail strategy: S4 tests start as XFAIL; XFAIL → XPASS as feature PRs land.
 # ============================================================
 
 name: Integration Tests
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - "backend/**"
-      - "docker-compose*.yml"
-      - "infra/**"
   pull_request:
-    branches: [main, develop]
-    paths:
-      - "backend/**"
-      - "docker-compose*.yml"
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "snippets/**"
+      - "LICENSE*"
+      - ".gitignore"
+      - ".editorconfig"
+      - ".actignore"
+      - ".actrc"
+      - ".vscode/**"
   workflow_dispatch:
 
 concurrency:
@@ -28,7 +30,7 @@ concurrency:
 
 jobs:
   integration-tests:
-    name: "🔗 Integration Tests (Docker)"
+    name: "Integration Tests (Docker)"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -107,7 +109,7 @@ jobs:
         run: |
           for i in $(seq 1 30); do
             if curl -fs http://localhost:4566/_localstack/health | grep -qE '"sqs":\s*"(running|available)"'; then
-              echo "✅ SQS is ready"
+              echo "SQS is ready"
               break
             fi
             echo "Waiting for SQS... ($i/30)"
@@ -120,14 +122,14 @@ jobs:
           # on both real GitHub Actions runners and slim `act` images that lack awscli.
           LOCALSTACK_CID=$(docker ps --filter "ancestor=localstack/localstack:3" --format "{{.ID}}" | head -1)
           if [ -z "$LOCALSTACK_CID" ]; then
-            echo "❌ LocalStack service container not found" >&2
+            echo "LocalStack service container not found" >&2
             docker ps >&2
             exit 1
           fi
           for q in dass-tasks dass-tasks-normal dass-tasks-scheduled dass-tasks-retry; do
             docker exec "$LOCALSTACK_CID" awslocal sqs create-queue --queue-name "$q"
           done
-          echo "✅ SQS queues created"
+          echo "SQS queues created"
 
       - name: Run DB migrations (Main DB)
         run: uv run alembic upgrade head
@@ -148,22 +150,18 @@ jobs:
       - name: Integration summary
         if: always()
         run: |
-          echo "## 🔗 Integration Test Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          # grep -c prints "0" AND exits 1 on no-match, so `|| echo 0` would
+          # produce "0\n0" and break markdown rendering. Use `|| true` instead.
+          PASSED=$(grep -c " PASSED" integration-results.txt 2>/dev/null || true)
+          FAILED=$(grep -c " FAILED" integration-results.txt 2>/dev/null || true)
+          ERRORS=$(grep -c " ERROR" integration-results.txt 2>/dev/null || true)
 
-          PASSED=$(grep -c " PASSED" integration-results.txt 2>/dev/null || echo 0)
-          XFAILED=$(grep -c " XFAIL" integration-results.txt 2>/dev/null || echo 0)
-          XPASSED=$(grep -c " XPASS" integration-results.txt 2>/dev/null || echo 0)
-          FAILED=$(grep -c " FAILED" integration-results.txt 2>/dev/null || echo 0)
-          ERRORS=$(grep -c " ERROR" integration-results.txt 2>/dev/null || echo 0)
-
-          echo "| Status | Count | Description |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Passed | $PASSED | ✅ passed |" >> $GITHUB_STEP_SUMMARY
-          echo "| XFail | $XFAILED | ⏳ feature not yet implemented |" >> $GITHUB_STEP_SUMMARY
-          echo "| XPass | $XPASSED | 🎉 feature landed, test now passes |" >> $GITHUB_STEP_SUMMARY
-          echo "| Failed | $FAILED | ❌ regression |" >> $GITHUB_STEP_SUMMARY
-          echo "| Error | $ERRORS | 💥 test setup error |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "_Sprint 4 done when XFail = 0 and all tests pass_" >> $GITHUB_STEP_SUMMARY
-          
+          {
+            echo "## Integration Test Summary"
+            echo ""
+            echo "| Status | Count |"
+            echo "|--------|-------|"
+            echo "| Passed | ${PASSED:-0} |"
+            echo "| Failed | ${FAILED:-0} |"
+            echo "| Error  | ${ERRORS:-0} |"
+          } >> "$GITHUB_STEP_SUMMARY"
