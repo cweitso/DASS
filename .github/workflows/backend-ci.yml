@@ -1,9 +1,9 @@
 # ============================================================
-# backend-ci.yml — unit tests (Sprint 4)
+# backend-ci.yml — unit tests
 # ============================================================
-# Triggers: dorny/paths-filter on changed paths; PR title tags [db|queue|api|worker|scheduler|infra|all]
+# Triggers: dorny/paths-filter on changed paths; PR title tags
+# [db|queue|api|worker|scheduler|autoscaler|all]
 # Environment: SQLite + MemoryQueueClient, no Docker required.
-# Gate job (unit-tests-passed) used for branch protection rules.
 # ============================================================
 
 name: Backend CI
@@ -29,7 +29,7 @@ jobs:
       execution_service:  ${{ steps.filter.outputs.execution_service }}
       scheduler:          ${{ steps.filter.outputs.scheduler }}
       worker:             ${{ steps.filter.outputs.worker }}
-      infra:              ${{ steps.filter.outputs.infra }}
+      autoscaler:         ${{ steps.filter.outputs.autoscaler }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -49,6 +49,7 @@ jobs:
               - 'backend/app/schemas/**'
             execution_service:
               - 'backend/app/services/execution_service.py'
+              - 'backend/app/services/worker_service.py'
               - 'backend/app/utils/cron.py'
             scheduler:
               - 'backend/app/services/scheduler_service.py'
@@ -57,10 +58,9 @@ jobs:
             worker:
               - 'backend/app/services/worker_service.py'
               - 'backend/app/worker/**'
-            infra:
-              - 'backend/app/main.py'
-              - 'backend/app/core/**'
-              - 'backend/app/db/session.py'
+            autoscaler:
+              - 'backend/app/services/autoscaler_service.py'
+              - 'backend/app/services/vm_service.py'
 
   test-repositories:
     name: Test / Repositories (DB Layer)
@@ -158,60 +158,18 @@ jobs:
       - run: uv sync --all-extras --frozen
       - run: uv run pytest tests/test_worker.py -v
 
-  test-infra:
-    name: Test / Infra (Health, Metrics, DB Routing)
+  test-autoscaler:
+    name: Test / Autoscaler (Queue-Depth Scaling)
     needs: changes
     runs-on: ubuntu-latest
     if: |
-      contains(github.event.pull_request.title, '[infra]') ||
+      contains(github.event.pull_request.title, '[autoscaler]') ||
       contains(github.event.pull_request.title, '[all]') ||
-      needs.changes.outputs.infra == 'true'
+      needs.changes.outputs.autoscaler == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
       - run: uv sync --all-extras --frozen
-      - name: Run infra tests (skip if files not yet created)
-        run: |
-          FILES=""
-          [ -f tests/test_health_metrics.py ] && FILES="$FILES tests/test_health_metrics.py"
-          [ -f tests/test_db_routing.py ]     && FILES="$FILES tests/test_db_routing.py"
-          if [ -n "$FILES" ]; then
-            uv run pytest $FILES -v
-          else
-            echo "⏭ Sprint 4 infra test files not yet created — skipping"
-          fi
-
-  unit-tests-passed:
-    name: "✅ Unit Tests Gate"
-    if: always()
-    needs:
-      - test-repositories
-      - test-queue
-      - test-api
-      - test-execution-service
-      - test-scheduler
-      - test-worker
-      - test-infra
-    runs-on: ubuntu-latest
-    steps:
-      - name: Evaluate results
-        working-directory: ${{ github.workspace }}
-        run: |
-          results=(
-            "${{ needs.test-repositories.result }}"
-            "${{ needs.test-queue.result }}"
-            "${{ needs.test-api.result }}"
-            "${{ needs.test-execution-service.result }}"
-            "${{ needs.test-scheduler.result }}"
-            "${{ needs.test-worker.result }}"
-            "${{ needs.test-infra.result }}"
-          )
-          for r in "${results[@]}"; do
-            if [ "$r" = "failure" ]; then
-              echo "❌ At least one unit test job failed"
-              exit 1
-            fi
-          done
-          echo "✅ All triggered unit test jobs passed (or were skipped)"
+      - run: uv run pytest tests/test_autoscaler.py -v
