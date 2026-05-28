@@ -20,6 +20,13 @@ services:
     environment:
       DASS_LOG_LEVEL: DEBUG
 
+  autoscaler:
+    command: python -m app.cli autoscaler
+    volumes:
+      - ./backend:/app
+    environment:
+      DASS_LOG_LEVEL: DEBUG
+
   frontend:
     build:
       context: ./frontend
