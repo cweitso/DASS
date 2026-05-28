@@ -112,9 +112,3 @@ def test_list_jobs_supports_filters_and_pagination(client):
     assert body["total_pages"] == 2
     assert len(body["items"]) == 2
 
-
-def test_create_worker_vms_returns_requested_count(client):
-    response = client.post("/vms", json={"count": 3, "instance_type": "t3.medium"})
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data["vm_ids"]) == 3

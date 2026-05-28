@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -97,17 +98,39 @@ class TestJobRepository:
         job_repo.delete(created)
         assert job_repo.get(job_id) is None
 
-    def test_due_jobs_returns_past_next_fire_at(self, job_repo):
+    def test_due_jobs_filters_by_enabled_and_timing(self, job_repo, db_session):
+        """due_jobs 只能撈到 enabled=True 且 next_fire_at <= now 的 job。"""
         now = datetime.now(UTC)
-        created = job_repo.create(
-            _make_job(name="due-job", next_fire_at=now - timedelta(seconds=1))
+
+        # 1. Happy path: 已到期 + enabled → 抓得到
+        job_normal = _make_job(name="due-job", next_fire_at=now - timedelta(minutes=1))
+        # 2. Sad path: 雖然到期但被停用 → 不該抓到
+        job_disabled = _make_job(
+            name="disabled-job",
+            enabled=False,
+            next_fire_at=now - timedelta(minutes=1),
         )
+        # 3. Edge: 尚未到期 → 不該抓到
+        job_future = _make_job(
+            name="future-job",
+            next_fire_at=now + timedelta(minutes=1),
+        )
+        # 4. Edge: 剛好現在這一秒（<= 應該抓到）
+        job_exact_now = _make_job(name="exact-now-job", next_fire_at=now)
+
+        db_session.add_all([job_normal, job_disabled, job_future, job_exact_now])
+        db_session.commit()
+
         due = job_repo.due_jobs(now)
-        assert any(j.id == created.id for j in due)
+        due_ids = {j.id for j in due}
+
+        assert len(due) == 2
+        assert job_normal.id in due_ids
+        assert job_exact_now.id in due_ids
 
 
 class TestTaskRepository:
-    """Tests for TaskRepository CRUD — calls repo with Task model objects per stub TODOs."""
+    """Tests for TaskRepository CRUD + claim/orphan/mark_failed semantics."""
 
     def _seed_job(self, db_session) -> Job:
         """Insert a Job directly via session for FK setup (don't go through repo)."""
@@ -148,3 +171,140 @@ class TestTaskRepository:
         )
         db_session.commit()
         assert task_repo.count_running_for_job(job.id) == 1
+
+    def test_claim_pending_success(self, task_repo, db_session):
+        """pending task 被 worker 原子搶單後，狀態變 running 且 locked_by 寫入。"""
+        job = self._seed_job(db_session)
+        task = task_repo.create(_make_task(job.id, trigger_type="scheduled"))
+
+        locked_until = datetime.now(UTC) + timedelta(minutes=5)
+        claimed = task_repo.claim_pending(str(task.id), "worker-999", locked_until)
+
+        assert claimed is not None
+        assert claimed.status == "running"
+        assert claimed.locked_by == "worker-999"
+
+    def test_claim_pending_fails_when_already_claimed(self, task_repo, db_session):
+        """task 已經是 running 時，第二個 worker 搶不到，應回 None。"""
+        job = self._seed_job(db_session)
+        task = _make_task(
+            job.id,
+            status="running",
+            locked_by="worker-111",
+            trigger_type="scheduled",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+
+        locked_until = datetime.now(UTC) + timedelta(minutes=5)
+        claimed = task_repo.claim_pending(str(task.id), "worker-999", locked_until)
+
+        assert claimed is None
+
+    def test_claim_pending_concurrency_race(self, task_repo, db_session):
+        """5 個 worker 同時搶同一張 pending task，必須剛好只有 1 個搶到。"""
+        job = self._seed_job(db_session)
+        task = _make_task(job.id, trigger_type="scheduled")
+        db_session.add(task)
+        db_session.commit()
+        task_id = str(task.id)
+        locked_until = datetime.now(UTC) + timedelta(minutes=5)
+
+        def worker_rush(worker_name):
+            try:
+                return task_repo.claim_pending(task_id, worker_name, locked_until)
+            except Exception:
+                return None
+
+        worker_names = ["worker-A", "worker-B", "worker-C", "worker-D", "worker-E"]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(worker_rush, worker_names))
+
+        success_claims = [r for r in results if r is not None]
+        assert len(success_claims) == 1
+        assert success_claims[0].status == "running"
+        assert success_claims[0].locked_by in worker_names
+
+    def test_list_expired_running_edge_cases(self, task_repo, db_session):
+        """orphan 清道夫只能撈到 status=running 且 locked_until < now 的 task。"""
+        job = self._seed_job(db_session)
+        now = datetime.now(UTC)
+
+        # 過期 1 秒 → 應抓
+        expired = _make_task(
+            job.id,
+            status="running",
+            locked_until=now - timedelta(seconds=1),
+            trigger_type="scheduled",
+        )
+        # 還有 1 秒才過期 → 不該抓
+        alive = _make_task(
+            job.id,
+            status="running",
+            locked_until=now + timedelta(seconds=1),
+            trigger_type="scheduled",
+        )
+        # 已 success 但鎖時間殘留 → 不該抓
+        finished = _make_task(
+            job.id,
+            status="success",
+            locked_until=now - timedelta(days=1),
+            trigger_type="scheduled",
+        )
+        # locked_until == now（嚴格 <），不該抓
+        exact_zero = _make_task(
+            job.id,
+            status="running",
+            locked_until=now,
+            trigger_type="scheduled",
+        )
+        db_session.add_all([expired, alive, finished, exact_zero])
+        db_session.commit()
+
+        orphans = task_repo.list_expired_running(now)
+
+        assert len(orphans) == 1
+        assert orphans[0].id == expired.id
+
+    def test_mark_failed_clears_lock_and_records_output(self, task_repo, db_session):
+        """final=False：status→failed，locked_by/until 清空，stderr 寫入。"""
+        job = self._seed_job(db_session)
+        task = _make_task(
+            job.id,
+            status="running",
+            locked_by="worker-1",
+            locked_until=datetime.now(UTC) + timedelta(seconds=30),
+            trigger_type="manual",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+
+        updated = task_repo.mark_failed(task, stdout="some log", stderr="error trace", final=False)
+
+        assert updated.status == "failed"
+        assert updated.locked_by is None
+        assert updated.locked_until is None
+        assert updated.finished_at is not None
+        assert updated.stderr == "error trace"
+
+    def test_mark_failed_final_sets_terminal_status(self, task_repo, db_session):
+        """final=True：status→final_failed，並同樣清空鎖。"""
+        job = self._seed_job(db_session)
+        task = _make_task(
+            job.id,
+            status="running",
+            locked_by="worker-1",
+            locked_until=datetime.now(UTC) + timedelta(seconds=30),
+            trigger_type="manual",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+
+        updated = task_repo.mark_failed(task, stdout="logs", stderr="fatal error", final=True)
+
+        assert updated.status == "final_failed"
+        assert updated.locked_by is None
+        assert updated.locked_until is None
