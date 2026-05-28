@@ -2,7 +2,7 @@
 # integration-ci.yml — integration tests (Sprint 4)
 # ============================================================
 # Runs cross-module tests in real Docker (PostgreSQL + LocalStack SQS).
-# Triggers: push to main/develop, PR with [integration|all] title tag, workflow_dispatch.
+# Triggers: push to main/develop, any PR touching backend paths, workflow_dispatch.
 # xfail strategy: S4 tests start as XFAIL; XFAIL → XPASS as feature PRs land.
 # ============================================================
 
@@ -27,26 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  should-run:
-    name: Check trigger conditions
-    runs-on: ubuntu-latest
-    outputs:
-      run: ${{ steps.check.outputs.run }}
-    steps:
-      - id: check
-        run: |
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run=true" >> $GITHUB_OUTPUT
-          elif echo "${{ github.event.pull_request.title }}" | grep -qiE '\[(integration|all)\]'; then
-            echo "run=true" >> $GITHUB_OUTPUT
-          else
-            echo "run=false" >> $GITHUB_OUTPUT
-          fi
-
   integration-tests:
     name: "🔗 Integration Tests (Docker)"
-    needs: should-run
-    if: needs.should-run.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
