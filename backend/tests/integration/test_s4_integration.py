@@ -81,10 +81,14 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
 
     settings = Settings(
         queue_name=os.environ.get("DASS_QUEUE_NAME", "dass-tasks"),
+        queue_name_normal=os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
+        queue_name_scheduled=os.environ.get("DASS_QUEUE_NAME_SCHEDULED", "dass-tasks-scheduled"),
         sqs_endpoint_url=os.environ.get("DASS_SQS_ENDPOINT_URL", "http://localhost:4566"),
         queue_backend="sqs",
     )
-    sqs = SQSQueueClient(settings)
+    # Scheduler 派發必須落 scheduled queue，normal queue 應保持空 — 對應 worker 端的 normal > scheduled > retry 優先序
+    normal_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_normal)
+    scheduled_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_scheduled)
 
     job = make_job(
         name="integ-dispatch",
@@ -92,12 +96,14 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
     )
     main_db.flush()
 
-    service = SchedulerService(main_db, sqs, sqs)
+    service = SchedulerService(main_db, normal_sqs, scheduled_sqs)
     dispatched = service.dispatch_due_jobs()
     assert dispatched >= 1
 
-    messages = sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
-    assert len(messages) >= 1
+    scheduled_msgs = scheduled_sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
+    assert len(scheduled_msgs) >= 1
+    normal_msgs = normal_sqs.receive_tasks(max_messages=1, wait_time_seconds=0)
+    assert normal_msgs == []
 
 
 def test_worker_atomic_claim_on_postgres(main_db, make_job, make_task):

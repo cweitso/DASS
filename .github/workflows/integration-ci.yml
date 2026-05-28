@@ -84,6 +84,7 @@ jobs:
       DASS_SQS_ENDPOINT_URL: "http://localhost:4566"
       DASS_QUEUE_NAME: "dass-tasks"
       DASS_QUEUE_NAME_NORMAL: "dass-tasks-normal"
+      DASS_QUEUE_NAME_SCHEDULED: "dass-tasks-scheduled"
       DASS_QUEUE_NAME_RETRY: "dass-tasks-retry"
       DASS_QUEUE_BACKEND: "sqs"
       DASS_AWS_REGION: "us-east-1"
@@ -123,7 +124,7 @@ jobs:
             docker ps >&2
             exit 1
           fi
-          for q in dass-tasks dass-tasks-normal dass-tasks-retry; do
+          for q in dass-tasks dass-tasks-normal dass-tasks-scheduled dass-tasks-retry; do
             docker exec "$LOCALSTACK_CID" awslocal sqs create-queue --queue-name "$q"
           done
           echo "✅ SQS queues created"
