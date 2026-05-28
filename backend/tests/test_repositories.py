@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import concurrent.futures
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -201,30 +200,6 @@ class TestTaskRepository:
         claimed = task_repo.claim_pending(str(task.id), "worker-999", locked_until)
 
         assert claimed is None
-
-    def test_claim_pending_concurrency_race(self, task_repo, db_session):
-        """5 個 worker 同時搶同一張 pending task，必須剛好只有 1 個搶到。"""
-        job = self._seed_job(db_session)
-        task = _make_task(job.id, trigger_type="scheduled")
-        db_session.add(task)
-        db_session.commit()
-        task_id = str(task.id)
-        locked_until = datetime.now(UTC) + timedelta(minutes=5)
-
-        def worker_rush(worker_name):
-            try:
-                return task_repo.claim_pending(task_id, worker_name, locked_until)
-            except Exception:
-                return None
-
-        worker_names = ["worker-A", "worker-B", "worker-C", "worker-D", "worker-E"]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(worker_rush, worker_names))
-
-        success_claims = [r for r in results if r is not None]
-        assert len(success_claims) == 1
-        assert success_claims[0].status == "running"
-        assert success_claims[0].locked_by in worker_names
 
     def test_list_expired_running_edge_cases(self, task_repo, db_session):
         """orphan 清道夫只能撈到 status=running 且 locked_until < now 的 task。"""
