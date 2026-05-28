@@ -79,12 +79,6 @@ curl http://localhost:8000/metrics
 # Expected: {"jobs":0,"tasks":0}
 ```
 
-### Seed Example Data
-
-```bash
-docker compose exec api-server python scripts/seed.py
-```
-
 ### Stop
 
 ```bash
@@ -117,28 +111,12 @@ To enable verbose logging, edit `.env` and set `DASS_LOG_LEVEL=DEBUG`, then rest
 docker compose up --build
 ```
 
-### Common Issues
-
-| Symptom | Likely Cause | Fix |
-|---------|-------------|-----|
-| `connection refused` on port 8000 | API server still starting or crashed | Check `docker compose logs api-server` |
-| API server restarts repeatedly | Database or LocalStack not ready yet | Wait — Docker healthchecks handle ordering. If persistent, run `docker compose down -v && docker compose up --build` |
-| Frontend shows blank page | Frontend container still building | Check `docker compose logs frontend` — Next.js build takes a moment |
-
 ## Database Migrations
 
 Migrations run automatically when the API server starts (`entrypoint.sh` runs `alembic upgrade head`). To run manually:
 
 ```bash
 docker compose exec api-server alembic upgrade head
-```
-
-## Worker Scaling
-
-Workers are horizontally scalable:
-
-```bash
-docker compose up --scale worker=3
 ```
 
 ## Autoscaling
@@ -302,19 +280,15 @@ npm run dev
 
 Note: when running outside Docker, the database URL must use `localhost` instead of `postgres`, and the SQS endpoint must use `localhost` instead of `localstack`.
 
-## Implementation Status
-
-This repository is a scaffold — the architecture, interfaces, models, schemas, tests, and infrastructure are all in place, but the business logic has been hollowed out for the team to implement.
-
-The frontend dashboard also shows placeholder pages — the three interactive views (jobs-list-page, job-detail-page, job-form-page) are scaffolded but not yet implemented.
-
-The provided test suite (tests/) serves as the acceptance criteria. Once your implementations replace the NotImplementedError stubs, the tests should pass.
+Note: this minimal setup skips `postgres-replica`. With `DASS_REPLICA_DATABASE_URL` unset, the backend falls back to the primary DB for read paths, so read/write split behaviour is not exercised. If you need to test it, also start `postgres-replica` and set `DASS_REPLICA_DATABASE_URL` to point at it.
 
 ## Notes
 
 - PostgreSQL is the source of truth.
 - SQS is used only as a delivery mechanism.
 - The Next.js frontend proxies API requests to the backend through rewrites, so the browser stays on one origin and avoids CORS issues.
-- The scheduler runs every 5 seconds and is responsible for deciding when work should be dispatched.
+- The scheduler runs every `DASS_SCHEDULER_INTERVAL_SECONDS` (default `5`) and is responsible for deciding when work should be dispatched.
+- Each task executes inside an ephemeral Docker container spawned by the worker via the host Docker daemon; the job's `runtime_spec` (derived from `action_type` + `action_config`) decides image and command. Both `http` and `shell` action types compile down to this container model.
 - Workers claim tasks atomically and report results back to PostgreSQL.
+- The autoscaler watches queue depth and spawns/reaps extra workers — see the Autoscaling section above.
 - Shell execution is supported for local and internal use, but it is dangerous in production and should be restricted carefully.
