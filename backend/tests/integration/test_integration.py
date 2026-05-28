@@ -1,14 +1,4 @@
-"""
-Sprint 4 integration tests — cross-module end-to-end with real PostgreSQL + LocalStack SQS.
-
-xfail strategy: S4 features are marked @pytest.mark.xfail(strict=False).
-XFAIL → XPASS automatically as feature PRs land; remove @xfail once stable.
-
-Scenarios:
- 1-8. Sprint 3 baseline — expected to pass directly
- 9.   Dual-write: API create_job → Scheduler DB  (S4-SC-01, xfail)
-10.   Multi-queue: retry enqueues to Retry Queue (S4-QUEUE-02, xfail)
-"""
+"""Integration tests — cross-module end-to-end with real PostgreSQL + LocalStack SQS."""
 from __future__ import annotations
 
 import json
@@ -259,7 +249,7 @@ def test_api_job_crud_on_postgres(main_db, monkeypatch):
         app.dependency_overrides.clear()
 
 
-@pytest.mark.xfail(reason="S4-SC-01 dual-write not implemented", strict=False)
+@pytest.mark.skip(reason="S4-SC-01 dual-write not yet implemented")
 def test_dual_write_api_to_scheduler_db(main_db, scheduler_db, monkeypatch):
     """API create_job must write to both main DB and Scheduler DB (S4-SC-01)."""
     from fastapi.testclient import TestClient
