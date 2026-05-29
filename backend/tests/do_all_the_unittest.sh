@@ -7,3 +7,4 @@ uv run pytest ./test_scheduler.py -v
 uv run pytest ./test_worker.py -v
 uv run pytest ./test_execution_service.py ./test_cron.py -v
 uv run pytest ./test_worker_dedicated_pools.py -v
+uv run pytest ./test_kubernetes_execution_service.py -v

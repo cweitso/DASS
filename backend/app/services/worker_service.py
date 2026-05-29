@@ -13,7 +13,8 @@ from app.db.session import SessionLocal
 from app.models.task import Task
 from app.repositories.job_repository import JobRepository
 from app.repositories.task_repository import TaskRepository
-from app.services.execution_service import ContainerSpec, ExecutionResult, ExecutionService
+from app.services.execution_factory import get_execution_service
+from app.services.execution_service import ContainerSpec, ExecutionResult
 from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ class WorkerService:
         self.claim_seconds = claim_seconds
         self.tasks = TaskRepository(db)
         self.jobs = JobRepository(db)
-        self.executor = ExecutionService()
+        self.executor = get_execution_service()
 
     def claim_task(self, task_id: str) -> Task | None:
         locked_until = utcnow() + timedelta(seconds=self.claim_seconds)

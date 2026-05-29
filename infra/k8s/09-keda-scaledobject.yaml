@@ -1,0 +1,73 @@
+# Three ScaledObjects — one per queue, each targeting its own Deployment.
+# Each scales independently: desired = ceil(queue_depth / 20), clamped to [1, 10].
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dass-worker-normal
+  namespace: dass
+spec:
+  scaleTargetRef:
+    name: dass-worker-normal
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+  - type: aws-sqs-queue
+    authenticationRef:
+      name: keda-aws-credentials
+    metadata:
+      queueURL: http://host.minikube.internal:4566/000000000000/dass-tasks-normal
+      queueLength: "20"
+      awsRegion: us-east-1
+      awsEndpoint: http://host.minikube.internal:4566
+      identityOwner: pod
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dass-worker-scheduled
+  namespace: dass
+spec:
+  scaleTargetRef:
+    name: dass-worker-scheduled
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+  - type: aws-sqs-queue
+    authenticationRef:
+      name: keda-aws-credentials
+    metadata:
+      queueURL: http://host.minikube.internal:4566/000000000000/dass-tasks-scheduled
+      queueLength: "20"
+      awsRegion: us-east-1
+      awsEndpoint: http://host.minikube.internal:4566
+      identityOwner: pod
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dass-worker-retry
+  namespace: dass
+spec:
+  scaleTargetRef:
+    name: dass-worker-retry
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+  - type: aws-sqs-queue
+    authenticationRef:
+      name: keda-aws-credentials
+    metadata:
+      queueURL: http://host.minikube.internal:4566/000000000000/dass-tasks-retry
+      queueLength: "20"
+      awsRegion: us-east-1
+      awsEndpoint: http://host.minikube.internal:4566
+      identityOwner: pod

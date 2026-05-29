@@ -159,6 +159,7 @@ services:
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-worker}
+      DASS_DOCKER_NETWORK: dass_dass-net
     # S4: worker 透過 host docker daemon 起 job container；需要把 docker.sock mount 進來。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -27,6 +27,9 @@ class ExecutionResult:
 
 
 class ExecutionService:
+    def __init__(self, network: str | None = None):
+        self.network = network
+
     def run(self, spec: ContainerSpec) -> ExecutionResult:
         """Execute a job as a Docker container using a pre-built ContainerSpec."""
         try:
@@ -36,6 +39,9 @@ class ExecutionService:
 
     def _run_container(self, spec: ContainerSpec) -> ExecutionResult:
         docker_cmd = ["docker", "run", "--rm"]
+
+        if self.network:
+            docker_cmd.extend(["--network", self.network])
 
         # Security note:
         # Do not allow user-controlled --privileged, host networking, host volume mounts,

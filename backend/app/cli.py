@@ -23,8 +23,8 @@ from sqlalchemy import create_engine, text
 logger = logging.getLogger(__name__)
 
 
-# Per spec：一個 worker VM 每條 queue 最多跑 2 個 job container
-CONTAINERS_PER_VM = 2
+# Per spec：一個 worker VM 每條 queue 最多跑幾個 job container
+CONTAINERS_PER_VM = 10
 
 
 def run_scheduler() -> None:
@@ -56,6 +56,12 @@ def run_autoscaler() -> None:
     """啟動 AutoScaler 主迴圈，獨立 process。"""
     settings = get_settings()
     configure_logging(level=settings.log_level)
+
+    if settings.execution_backend == "kubernetes":
+        logger.info(
+            "Autoscaler disabled: worker scaling is delegated to KEDA (execution_backend=kubernetes)."
+        )
+        return
 
     autoscaler = AutoScaler(settings)
     if not autoscaler.enabled:
@@ -141,19 +147,39 @@ def _run_dedicated_pool(queue, queue_name: str, max_workers: int, settings, retr
                 time.sleep(5)
 
 
-def run_worker() -> None:
-    """啟動 Worker：每條 queue 各自一個專屬 pool，三個 pool 平行執行。"""
+_QUEUE_FACTORIES = {
+    "normal": get_normal_queue_client,
+    "scheduled": get_scheduled_queue_client,
+    "retry": get_retry_queue_client,
+}
+
+
+def run_worker(queue: str | None = None) -> None:
+    """啟動 Worker。
+
+    queue=None  → 啟動全部三條 queue 的 pool（Docker Compose 模式）
+    queue=<name> → 只啟動指定 queue 的 pool（K8s 每 pool 一個 Deployment 模式）
+    """
+    if queue is not None and queue not in _QUEUE_FACTORIES:
+        raise SystemExit(f"Unknown queue: {queue!r}. Valid values: {list(_QUEUE_FACTORIES)}")
+
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    normal_queue = get_normal_queue_client()
-    scheduled_queue = get_scheduled_queue_client()
     retry_queue = get_retry_queue_client()
 
+    queues_to_run = (
+        [(queue, _QUEUE_FACTORIES[queue]())]
+        if queue is not None
+        else [(name, factory()) for name, factory in _QUEUE_FACTORIES.items()]
+    )
+
     logger.info(
-        "Worker '%s' started. pools=3, containers_per_pool=%d",
+        "Worker '%s' started. pools=%d, containers_per_pool=%d, queues=%s",
         settings.worker_id,
+        len(queues_to_run),
         CONTAINERS_PER_VM,
+        [name for name, _ in queues_to_run],
     )
 
     pool_threads = [
@@ -163,11 +189,7 @@ def run_worker() -> None:
             daemon=True,
             name=f"pool-{name}",
         )
-        for q, name in [
-            (normal_queue, "normal"),
-            (scheduled_queue, "scheduled"),
-            (retry_queue, "retry"),
-        ]
+        for name, q in queues_to_run
     ]
 
     for t in pool_threads:
@@ -191,7 +213,12 @@ def main() -> None:
     if command == "scheduler":
         run_scheduler()
     elif command == "worker":
-        run_worker()
+        queue_arg = None
+        if "--queue" in sys.argv:
+            idx = sys.argv.index("--queue")
+            if idx + 1 < len(sys.argv):
+                queue_arg = sys.argv[idx + 1]
+        run_worker(queue=queue_arg)
     elif command == "autoscaler":
         run_autoscaler()
     else:
