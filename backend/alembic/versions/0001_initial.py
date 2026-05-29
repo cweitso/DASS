@@ -50,6 +50,14 @@ def upgrade() -> None:
     op.create_index("ix_tasks_job_id", "tasks", ["job_id"])
     op.create_index("ix_tasks_status", "tasks", ["status"])
     op.create_index("ix_tasks_locked_until_running", "tasks", ["locked_until"], postgresql_where=sa.text("status = 'running'"))
+    op.add_column('jobs', sa.Column('job_type', sa.String(length=32), nullable=False))
+    op.alter_column('jobs', 'cron_expression',
+               existing_type=sa.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('jobs', 'next_fire_at',
+               existing_type=postgresql.TIMESTAMP(timezone=True),
+               nullable=True)
+    op.create_index(op.f('ix_jobs_job_type'), 'jobs', ['job_type'], unique=False)
 
 
 def downgrade() -> None:
@@ -60,4 +68,12 @@ def downgrade() -> None:
     op.drop_index("ix_jobs_next_fire_at", table_name="jobs")
     op.drop_table("tasks")
     op.drop_table("jobs")
+    op.drop_index(op.f('ix_jobs_job_type'), table_name='jobs')
+    op.alter_column('jobs', 'next_fire_at',
+               existing_type=postgresql.TIMESTAMP(timezone=True),
+               nullable=False)
+    op.alter_column('jobs', 'cron_expression',
+               existing_type=sa.VARCHAR(length=255),
+               nullable=False)
+    op.drop_column('jobs', 'job_type')
 
