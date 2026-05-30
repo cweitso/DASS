@@ -20,8 +20,8 @@ class JobRepository:
         # 2. 執行 commit 提交變更到資料庫
         self.db.commit()
         
-        # 3. 執行 refresh 取得資料庫生成的欄位（例如 id）
-        self.db.refresh(job)
+        # 3. 執行 refresh 取得資料庫生成的欄位（例如 id)，5/30 更新，只有 server_default 的才會在資料庫生成
+        # self.db.refresh(job)
         
         # 4. 回傳處理完的 job 物件
         return job
