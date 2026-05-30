@@ -18,8 +18,8 @@ primary_engine = create_engine(
     settings.database_url,
     echo=settings.database_echo,
     pool_pre_ping=True,
-    pool_size=20,       # 預設是 5，調整為 20
-    max_overflow=15,    # 允許額外溢出 15 個連線，總共最大支援 35 個併發連線
+    pool_size=20,       # 預設是 5，調整為 20，為了測試通過
+    max_overflow=15,    # 允許額外溢出 15 個連線，總共最大支援 35 個併發連線，為了測試通過
     pool_timeout=15,    # 超時等待縮短到 15 秒，避免卡死太久
 )
 # Replica引擎 - 負責讀取
