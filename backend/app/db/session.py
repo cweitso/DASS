@@ -18,9 +18,9 @@ primary_engine = create_engine(
     settings.database_url,
     echo=settings.database_echo,
     pool_pre_ping=True,
-    pool_size=20,       # 👈 預設是 5，直接放大到 50
-    max_overflow=15,    # 👈 允許額外溢出 30 個連線，總共最大支援 80 個併發連線
-    pool_timeout=15,    # 👈 超時等待縮短到 15 秒，避免卡死太久
+    pool_size=20,       # 預設是 5，直接放大到 50
+    max_overflow=15,    # 允許額外溢出 30 個連線，總共最大支援 80 個併發連線
+    pool_timeout=15,    # 超時等待縮短到 15 秒，避免卡死太久
 )
 # Replica引擎 - 負責讀取
 # 防呆機制：如果 .env 沒設定 Replica 網址，就退回使用 Primary (單機模式備援)
