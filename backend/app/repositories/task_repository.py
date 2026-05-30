@@ -17,7 +17,6 @@ class TaskRepository:
 
     def create(self, task: Task) -> Task:
         
-        # self.db.info["force_primary"] = True  # 過渡用 
         self.db.add(task)
         self.db.commit()
         # self.db.refresh(task) # if no force primary, this refresh might hit the replica and get stale data due to replica lag
