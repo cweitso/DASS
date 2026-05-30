@@ -34,7 +34,7 @@ DEFAULT_PAYLOAD: dict[str, Any] = {
     "action_config": {"command": "echo load-gen", "timeout_seconds": 5},
     "enabled": True,
     "concurrency_policy": "allow",
-    "max_retries": 0,
+    "max_retries": 3,
 }
 
 
