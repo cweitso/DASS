@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     shell_execution_enabled: bool = True
     http_request_timeout_seconds: int = 30
 
+    execution_backend: Literal["docker", "kubernetes"] = "docker"
+    k8s_namespace: str = "default"
+    k8s_poll_interval_seconds: float = 2.0
+    docker_network: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

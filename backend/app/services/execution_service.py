@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -27,43 +28,35 @@ class ExecutionResult:
 
 
 class ExecutionService:
-    def run(self, spec: ContainerSpec) -> ExecutionResult:
-        """Execute a job as a Docker container using a pre-built ContainerSpec."""
-        try:
-            return self._run_container(spec)
-        except Exception as exc:
-            return ExecutionResult(success=False, stdout="", stderr=str(exc))
+    def __init__(self, network: str | None = None):
+        self.network = network
 
-    def _run_container(self, spec: ContainerSpec) -> ExecutionResult:
+    def _build_docker_cmd(self, spec: ContainerSpec) -> list[str] | None:
+        """Build docker run command list. Returns None if env key validation fails."""
         docker_cmd = ["docker", "run", "--rm"]
-
-        # Security note:
-        # Do not allow user-controlled --privileged, host networking, host volume mounts,
-        # or raw Docker args. On EC2 workers, also prevent containers from reaching
-        # the instance metadata endpoint 169.254.169.254 if the worker has an IAM role.
+        if self.network:
+            docker_cmd.extend(["--network", self.network])
+        # Security: no --privileged, host networking, or host volume mounts allowed.
         if spec.cpu is not None:
             docker_cmd.extend(["--cpus", str(spec.cpu)])
-
         if spec.memory_mb is not None:
             docker_cmd.extend(["--memory", f"{spec.memory_mb}m"])
-
         if spec.working_dir:
             docker_cmd.extend(["-w", spec.working_dir])
-
         for key, value in spec.env.items():
             if not _ENV_KEY_RE.match(key):
-                return ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr=f"Invalid environment variable key: {key}",
-                )
+                return None
             docker_cmd.extend(["-e", f"{key}={value}"])
-
         docker_cmd.append(spec.image)
-
         if spec.command:
             docker_cmd.extend(spec.command)
+        return docker_cmd
 
+    def run(self, spec: ContainerSpec) -> ExecutionResult:
+        """Execute a job as a Docker container (blocking)."""
+        docker_cmd = self._build_docker_cmd(spec)
+        if docker_cmd is None:
+            return ExecutionResult(success=False, stdout="", stderr="Invalid environment variable key")
         try:
             result = subprocess.run(
                 docker_cmd,
@@ -72,14 +65,12 @@ class ExecutionService:
                 timeout=spec.timeout_seconds,
                 check=False,
             )
-
             return ExecutionResult(
                 success=result.returncode == 0,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 exit_code=result.returncode,
             )
-
         except subprocess.TimeoutExpired as exc:
             return ExecutionResult(
                 success=False,
@@ -87,11 +78,44 @@ class ExecutionService:
                 stderr=f"Container execution timed out after {spec.timeout_seconds}s",
                 exit_code=None,
             )
-
         except Exception as exc:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr=str(exc),
-                exit_code=None,
+            return ExecutionResult(success=False, stdout="", stderr=str(exc), exit_code=None)
+
+    async def run_async(self, spec: ContainerSpec) -> ExecutionResult:
+        """Execute a job as a Docker container (non-blocking async).
+
+        Uses asyncio.create_subprocess_exec so the event loop stays free
+        while the container is running — allowing many concurrent I/O-bound
+        jobs (e.g. long HTTP calls) to share a single worker thread.
+        """
+        docker_cmd = self._build_docker_cmd(spec)
+        if docker_cmd is None:
+            return ExecutionResult(success=False, stdout="", stderr="Invalid environment variable key")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *docker_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=spec.timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr=f"Container execution timed out after {spec.timeout_seconds}s",
+                    exit_code=None,
+                )
+            return ExecutionResult(
+                success=proc.returncode == 0,
+                stdout=stdout_b.decode(errors="replace"),
+                stderr=stderr_b.decode(errors="replace"),
+                exit_code=proc.returncode,
+            )
+        except Exception as exc:
+            return ExecutionResult(success=False, stdout="", stderr=str(exc), exit_code=None)

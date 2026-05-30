@@ -1,0 +1,125 @@
+# Three worker Deployments — one per queue.
+# Each Deployment is scaled independently by its own ScaledObject (09-keda-scaledobject.yaml).
+# Workers only consume the queue they are assigned to via --queue <name>.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dass-worker-normal
+  namespace: dass
+  labels:
+    app: dass-worker-normal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dass-worker-normal
+  template:
+    metadata:
+      labels:
+        app: dass-worker-normal
+    spec:
+      serviceAccountName: dass-worker
+      enableServiceLinks: false
+      containers:
+      - name: worker
+        image: dass-worker:local
+        imagePullPolicy: Never
+        command: ["python", "-m", "app.cli", "worker", "--queue", "normal"]
+        envFrom:
+        - configMapRef:
+            name: dass-config
+        env:
+        - name: DASS_WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "2Gi"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dass-worker-scheduled
+  namespace: dass
+  labels:
+    app: dass-worker-scheduled
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dass-worker-scheduled
+  template:
+    metadata:
+      labels:
+        app: dass-worker-scheduled
+    spec:
+      serviceAccountName: dass-worker
+      enableServiceLinks: false
+      containers:
+      - name: worker
+        image: dass-worker:local
+        imagePullPolicy: Never
+        command: ["python", "-m", "app.cli", "worker", "--queue", "scheduled"]
+        envFrom:
+        - configMapRef:
+            name: dass-config
+        env:
+        - name: DASS_WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "2Gi"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dass-worker-retry
+  namespace: dass
+  labels:
+    app: dass-worker-retry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dass-worker-retry
+  template:
+    metadata:
+      labels:
+        app: dass-worker-retry
+    spec:
+      serviceAccountName: dass-worker
+      enableServiceLinks: false
+      containers:
+      - name: worker
+        image: dass-worker:local
+        imagePullPolicy: Never
+        command: ["python", "-m", "app.cli", "worker", "--queue", "retry"]
+        envFrom:
+        - configMapRef:
+            name: dass-config
+        env:
+        - name: DASS_WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "2Gi"

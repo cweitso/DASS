@@ -20,6 +20,7 @@ dependencies = [
   "croniter>=2.0.5",
   "python-json-logger>=2.0.7",
   "docker>=7.1.0",
+  "kubernetes>=28.0.0",
 ]
 
 [project.optional-dependencies]
@@ -47,4 +48,5 @@ markers = [
 # --durations=10：顯示最慢的 10 個 test，方便抓瓶頸
 # -ra：在結尾彙整 failures/errors/skips 的原因
 addopts = "--ignore=tests/integration -v --durations=10 -ra"
+asyncio_mode = "auto"
 

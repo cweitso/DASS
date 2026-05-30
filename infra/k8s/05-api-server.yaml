@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dass-api
+  namespace: dass
+  labels:
+    app: dass-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dass-api
+  template:
+    metadata:
+      labels:
+        app: dass-api
+    spec:
+      # entrypoint.sh runs `alembic upgrade head` before uvicorn starts.
+      # Pod will restart until postgres is ready — no init container needed.
+      # Disable K8s service-discovery env var injection to prevent collisions with
+      # pydantic DASS_ prefix (e.g. DASS_API_PORT injected by the dass-api Service).
+      enableServiceLinks: false
+      initContainers:
+      - name: wait-for-postgres
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z postgres 5432; do echo waiting for postgres; sleep 2; done']
+      - name: wait-for-localstack
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z localstack 4566; do echo waiting for localstack; sleep 2; done']
+      containers:
+      - name: api
+        image: dass-api:local
+        imagePullPolicy: Never
+        envFrom:
+        - configMapRef:
+            name: dass-config
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 12
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dass-api
+  namespace: dass
+spec:
+  type: NodePort
+  selector:
+    app: dass-api
+  ports:
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30800

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keda-aws-secrets
+  namespace: dass
+type: Opaque
+# LocalStack accepts any non-empty credentials.
+# Values are base64("dass") = ZGFzcw==
+data:
+  AWS_ACCESS_KEY_ID: ZGFzcw==
+  AWS_SECRET_ACCESS_KEY: ZGFzcw==
+
+---
+# KEDA operator uses these credentials when querying LocalStack SQS
+# to determine queue depth for scaling decisions.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-aws-credentials
+  namespace: dass
+spec:
+  secretTargetRef:
+  - parameter: awsAccessKeyID
+    name: keda-aws-secrets
+    key: AWS_ACCESS_KEY_ID
+  - parameter: awsSecretAccessKey
+    name: keda-aws-secrets
+    key: AWS_SECRET_ACCESS_KEY
