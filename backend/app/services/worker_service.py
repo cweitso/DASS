@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -13,7 +14,8 @@ from app.db.session import SessionLocal
 from app.models.task import Task
 from app.repositories.job_repository import JobRepository
 from app.repositories.task_repository import TaskRepository
-from app.services.execution_service import ContainerSpec, ExecutionResult, ExecutionService
+from app.services.execution_factory import get_execution_service
+from app.services.execution_service import ContainerSpec, ExecutionResult
 from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ class WorkerService:
         self.claim_seconds = claim_seconds
         self.tasks = TaskRepository(db)
         self.jobs = JobRepository(db)
-        self.executor = ExecutionService()
+        self.executor = get_execution_service()
 
     def claim_task(self, task_id: str) -> Task | None:
         locked_until = utcnow() + timedelta(seconds=self.claim_seconds)
@@ -181,3 +183,89 @@ class WorkerService:
             return
 
         self.tasks.mark_failed(task, stdout, stderr, final=True)
+
+    # ── Async path ────────────────────────────────────────────────────────────
+    # The async variants let the event loop multiplex many concurrent I/O-bound
+    # jobs (e.g. long HTTP calls) on a single thread instead of tying up one
+    # OS thread per job the way the sync path + ThreadPoolExecutor does.
+
+    async def process_task_id_async(
+        self,
+        task_id: str,
+        extend_visibility: Callable[[int], None] | None = None,
+    ) -> bool:
+        """Async equivalent of process_task_id. DB ops are fast and run inline;
+        only the container execution truly yields to the event loop."""
+        task = self._claim_task_with_retry(task_id)
+        if not task:
+            existing = self.tasks.get(task_id)
+            if existing is None or existing.status in ("success", "failed", "final_failed"):
+                return True
+            return False
+
+        job = self._get_job_with_retry(task.job_id)
+        if not job:
+            self.tasks.mark_failed(task, stdout="", stderr="Job not found", final=True)
+            return True
+
+        result = await self._execute_job_async(task, job, extend_visibility)
+
+        if result.success:
+            self.tasks.mark_success(task, result.stdout, result.stderr)
+            return True
+
+        self._handle_failure(task, job, result.stdout, result.stderr)
+        return True
+
+    async def _execute_job_async(
+        self,
+        task: Task,
+        job,
+        extend_visibility: Callable[[int], None] | None = None,
+    ) -> ExecutionResult:
+        spec_data = job.runtime_spec or {}
+        try:
+            spec = ContainerSpec(**spec_data)
+        except Exception as exc:
+            return ExecutionResult(success=False, stdout="", stderr=str(exc), exit_code=None)
+
+        heartbeat_interval = max(1, int(self.claim_seconds * 0.6))
+        task_id = task.id
+        worker_id = self.worker_id
+        claim_seconds = self.claim_seconds
+
+        async def _heartbeat_loop() -> None:
+            while True:
+                await asyncio.sleep(heartbeat_interval)
+                try:
+                    with SessionLocal() as hb_db:
+                        hb_db.info["force_primary"] = True
+                        hb_db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.locked_by == worker_id)
+                            .values(locked_until=utcnow() + timedelta(seconds=claim_seconds))
+                        )
+                        hb_db.commit()
+                except Exception:
+                    logger.exception("Heartbeat DB extend failed task_id=%s", task_id)
+                if extend_visibility is not None:
+                    try:
+                        extend_visibility(claim_seconds)
+                    except Exception:
+                        logger.exception("Heartbeat SQS extend failed task_id=%s", task_id)
+
+        hb_task = asyncio.create_task(_heartbeat_loop())
+        try:
+            if hasattr(self.executor, "run_async"):
+                return await self.executor.run_async(spec)
+            # Fallback for executors without async support: run in thread so
+            # the event loop stays responsive during the blocking call.
+            return await asyncio.to_thread(self.executor.run, spec)
+        except Exception as exc:
+            return ExecutionResult(success=False, stdout="", stderr=str(exc), exit_code=None)
+        finally:
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
