@@ -44,8 +44,8 @@ class RoutingSession(Session):
         """
         # 情境 0 (S4 加)：呼叫端開了 force_primary 旗標 → 所有讀寫一律走 Primary。
         # 用於 worker 這種「寫完馬上要讀回來」的路徑，避免撞到 replica lag。
-        if self.info.get("force_primary"):
-            return primary_engine
+        # if self.info.get("force_primary"):
+        #    return primary_engine      # 過渡用
 
         # 情境 A：當 SQLAlchemy 正在打包準備寫入 (Insert/Update/Delete) 時 -> Primary
         if self._flushing:
