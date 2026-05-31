@@ -89,6 +89,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started # 確保代理大廳開門了
     networks:
       - dass-net
     restart: unless-stopped

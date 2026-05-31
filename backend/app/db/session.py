@@ -6,9 +6,27 @@ from app.core.config import get_settings
 import logging
 from sqlalchemy.exc import OperationalError
 
-logger = logging.getLogger(__name__) # 建立一個簡單的 logger 來看切換的警告
+import os
 
+logger = logging.getLogger(__name__) # 建立一個簡單的 logger 來看切換的警告
 settings = get_settings()
+
+# 智慧雷達：看看到底是哪一個元件（API、Worker 還是 Scheduler）正在初始化我
+worker_id = os.getenv("DASS_WORKER_ID", "api-server")
+
+# 依據「黃金連線池配比矩陣」動態分發額度
+if worker_id == "api-server":
+    CURRENT_POOL_SIZE = 30       # API Server 衝刺常駐 30
+    CURRENT_MAX_OVERFLOW = 20    # 允許爆發至 50 併發
+    CURRENT_TIMEOUT = 15
+elif worker_id in ["worker", "autoscaler"]:
+    CURRENT_POOL_SIZE = 5        # 分散式多 Worker Pool 的精簡額度
+    CURRENT_MAX_OVERFLOW = 5     # 嚴格限制防範連線爆炸，交給 PgBouncer 削峰填谷
+    CURRENT_TIMEOUT = 30         # 背景任務可以耐心等 30 秒
+else: # scheduler 或其他
+    CURRENT_POOL_SIZE = 5
+    CURRENT_MAX_OVERFLOW = 0
+    CURRENT_TIMEOUT = 30
 
 # ==========================================
 # 1. 建立雙引擎 (Dual Engines)
@@ -18,9 +36,9 @@ primary_engine = create_engine(
     settings.database_url,
     echo=settings.database_echo,
     pool_pre_ping=True,
-    pool_size=20,       # 預設是 5，調整為 20，為了測試通過
-    max_overflow=15,    # 允許額外溢出 15 個連線，總共最大支援 35 個併發連線，為了測試通過
-    pool_timeout=15,    # 超時等待縮短到 15 秒，避免卡死太久
+    pool_size=CURRENT_POOL_SIZE,          # 動態注入最精準的椅子數量
+    max_overflow=CURRENT_MAX_OVERFLOW,    # 動態注入溢出量
+    pool_timeout=CURRENT_TIMEOUT,
 )
 # Replica引擎 - 負責讀取
 # 防呆機制：如果 .env 沒設定 Replica 網址，就退回使用 Primary (單機模式備援)
@@ -31,6 +49,8 @@ replica_engine = create_engine(
     replica_url,
     echo=settings.database_echo,
     pool_pre_ping=True,
+    pool_size=20, # 預設 5
+    max_overflow=15, # 預設 10
     pool_timeout=2,
     connect_args={"connect_timeout": 2},
 )
