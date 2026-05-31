@@ -1,14 +1,4 @@
-"""
-Sprint 4 integration tests — cross-module end-to-end with real PostgreSQL + LocalStack SQS.
-
-xfail strategy: S4 features are marked @pytest.mark.xfail(strict=False).
-XFAIL → XPASS automatically as feature PRs land; remove @xfail once stable.
-
-Scenarios:
- 1-8. Sprint 3 baseline — expected to pass directly
- 9.   Dual-write: API create_job → Scheduler DB  (S4-SC-01, xfail)
-10.   Multi-queue: retry enqueues to Retry Queue (S4-QUEUE-02, xfail)
-"""
+"""Integration tests — cross-module end-to-end with real PostgreSQL + LocalStack SQS."""
 from __future__ import annotations
 
 import json
@@ -81,10 +71,14 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
 
     settings = Settings(
         queue_name=os.environ.get("DASS_QUEUE_NAME", "dass-tasks"),
+        queue_name_normal=os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
+        queue_name_scheduled=os.environ.get("DASS_QUEUE_NAME_SCHEDULED", "dass-tasks-scheduled"),
         sqs_endpoint_url=os.environ.get("DASS_SQS_ENDPOINT_URL", "http://localhost:4566"),
         queue_backend="sqs",
     )
-    sqs = SQSQueueClient(settings)
+    # Scheduler 派發必須落 scheduled queue，normal queue 應保持空 — 對應 worker 端的 normal > scheduled > retry 優先序
+    normal_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_normal)
+    scheduled_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_scheduled)
 
     job = make_job(
         name="integ-dispatch",
@@ -92,12 +86,14 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
     )
     main_db.flush()
 
-    service = SchedulerService(main_db, sqs, sqs)
+    service = SchedulerService(main_db, normal_sqs, scheduled_sqs)
     dispatched = service.dispatch_due_jobs()
     assert dispatched >= 1
 
-    messages = sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
-    assert len(messages) >= 1
+    scheduled_msgs = scheduled_sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
+    assert len(scheduled_msgs) >= 1
+    normal_msgs = normal_sqs.receive_tasks(max_messages=1, wait_time_seconds=0)
+    assert normal_msgs == []
 
 
 def test_worker_atomic_claim_on_postgres(main_db, make_job, make_task):
@@ -253,7 +249,7 @@ def test_api_job_crud_on_postgres(main_db, monkeypatch):
         app.dependency_overrides.clear()
 
 
-@pytest.mark.xfail(reason="S4-SC-01 dual-write not implemented", strict=False)
+@pytest.mark.skip(reason="S4-SC-01 dual-write not yet implemented")
 def test_dual_write_api_to_scheduler_db(main_db, scheduler_db, monkeypatch):
     """API create_job must write to both main DB and Scheduler DB (S4-SC-01)."""
     from fastapi.testclient import TestClient

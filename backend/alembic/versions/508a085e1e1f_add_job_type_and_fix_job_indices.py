@@ -40,10 +40,5 @@ def downgrade() -> None:
                existing_type=sa.VARCHAR(length=255),
                nullable=False)
     op.drop_column('jobs', 'job_type')
-    op.create_table('demo_sync',
-    sa.Column('id', sa.INTEGER(), autoincrement=True, nullable=False),
-    sa.Column('msg', sa.TEXT(), autoincrement=False, nullable=True),
-    sa.PrimaryKeyConstraint('id', name=op.f('demo_sync_pkey'))
-    )
     # ### end Alembic commands ###
 

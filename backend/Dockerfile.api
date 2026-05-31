@@ -12,7 +12,6 @@ COPY pyproject.toml /app/
 COPY app /app/app
 COPY alembic /app/alembic
 COPY alembic.ini /app/
-COPY scripts /app/scripts
 COPY entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh
