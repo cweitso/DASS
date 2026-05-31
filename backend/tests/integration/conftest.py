@@ -91,6 +91,7 @@ def purge_queues(sqs_client):
     queue_names = [
         os.environ.get("DASS_QUEUE_NAME", "dass-tasks"),
         os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
+        os.environ.get("DASS_QUEUE_NAME_SCHEDULED", "dass-tasks-scheduled"),
         os.environ.get("DASS_QUEUE_NAME_RETRY", "dass-tasks-retry"),
     ]
     import botocore.exceptions

@@ -43,6 +43,20 @@ class TestSchedulerService:
         tasks = db_session.query(Task).filter(Task.job_id == job.id).all()
         assert len(tasks) == 1
 
+    def test_scheduler_dispatch_routes_to_scheduled_queue(self, db_session):
+        """Scheduler 的派發必須落在 scheduled queue，normal queue 應保持空。
+        Worker 端依 normal > scheduled > retry 優先序消費，路由錯了就違反這個設計。
+        """
+        normal_queue = MemoryQueueClient()
+        scheduled_queue = MemoryQueueClient()
+        _job(db_session)
+        service = SchedulerService(db_session, normal_queue, scheduled_queue)
+
+        service.dispatch_due_jobs()
+
+        assert normal_queue._queue.empty()
+        assert scheduled_queue._queue.qsize() == 1
+
     def test_concurrency_policy_forbid_skips_running_task(self, db_session):
         """Scheduler should skip job if concurrency_policy=forbid and task is running."""
         queue = MemoryQueueClient()
