@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     aws_session_token: str | None = None
     sqs_endpoint_url: str | None = "http://localstack:4566"
 
-    scheduler_interval_seconds: int = 5
+    scheduler_interval_seconds: int = 30
     scheduler_locked_task_scan_seconds: int = 5
     # 短 visibility + worker 端 heartbeat 動態延長；長 job 也安全，crash 時 30s 內可被 reclaim。
     worker_visibility_timeout_seconds: int = 30

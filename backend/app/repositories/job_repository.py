@@ -63,3 +63,14 @@ class JobRepository:
         
         result = self.db.execute(stmt)
         return result.scalars().all()
+
+    def list_updated_since(self, since: datetime | None) -> list[Job]:
+        # 不預設過濾 enabled，確保能抓到被停用的任務 (Soft Delete)
+        stmt = select(Job)
+        
+        # 若有提供 since，則只抓取該時間點之後異動過的任務 (增量拉取)
+        if since is not None:
+            stmt = stmt.where(Job.updated_at >= since)
+        
+        result = self.db.execute(stmt)
+        return result.scalars().all()
