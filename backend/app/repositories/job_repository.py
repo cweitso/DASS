@@ -20,10 +20,7 @@ class JobRepository:
         # 2. 執行 commit 提交變更到資料庫
         self.db.commit()
         
-        # 3. 執行 refresh 取得資料庫生成的欄位（例如 id）
-        self.db.refresh(job)
-        
-        # 4. 回傳處理完的 job 物件
+        # 3. 回傳處理完的 job 物件
         return job
 
     def list(self) -> list[Job]:
@@ -60,6 +57,17 @@ class JobRepository:
         
         # 1. 建立查詢語句：選擇 Job -> 加入過濾條件 -> 加入排序 , 5/24 補上鎖定定時任務，排除非定時任務
         stmt = select(Job).where(Job.job_type == "scheduled", Job.enabled == True, Job.next_fire_at <= now ).order_by(Job.next_fire_at.asc())
+        
+        result = self.db.execute(stmt)
+        return result.scalars().all()
+
+    def list_updated_since(self, since: datetime | None) -> list[Job]:
+        # 不預設過濾 enabled，確保能抓到被停用的任務 (Soft Delete)
+        stmt = select(Job)
+        
+        # 若有提供 since，則只抓取該時間點之後異動過的任務 (增量拉取)
+        if since is not None:
+            stmt = stmt.where(Job.updated_at >= since)
         
         result = self.db.execute(stmt)
         return result.scalars().all()

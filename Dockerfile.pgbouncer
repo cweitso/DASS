@@ -1,0 +1,9 @@
+# 使用輕量且絕對拉得下來的 Alpine 作為基底
+FROM alpine:3.19
+# 在本地直接安裝 Alpine 官方倉庫提供的 pgbouncer 標準套件
+RUN apk add --no-cache pgbouncer
+
+# 關鍵修正：改用物理 UID 70 進行身分切換，徹底繞過 passwd 檔案名稱解析死鎖
+USER 70
+# 預設開機命令
+CMD ["pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]

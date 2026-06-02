@@ -30,6 +30,9 @@ def _job(db_session, **overrides):
     return job
 
 
+from sqlalchemy.orm import sessionmaker
+
+
 class TestSchedulerService:
     """Tests for SchedulerService dispatch and orphan recovery."""
 
@@ -37,8 +40,14 @@ class TestSchedulerService:
         """Scheduler should dispatch a job when next_fire_at has passed."""
         queue = MemoryQueueClient()
         job = _job(db_session)
-        service = SchedulerService(db_session, queue, queue)
+
+        # 建立一個測試用的連線工廠，綁定到目前的測試資料庫引擎
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+
+        service.sync_jobs()
         created = service.dispatch_due_jobs()
+
         assert created == 1
         tasks = db_session.query(Task).filter(Task.job_id == job.id).all()
         assert len(tasks) == 1
@@ -50,10 +59,15 @@ class TestSchedulerService:
         normal_queue = MemoryQueueClient()
         scheduled_queue = MemoryQueueClient()
         _job(db_session)
-        service = SchedulerService(db_session, normal_queue, scheduled_queue)
+        
+        factory = sessionmaker(bind=db_session.get_bind())
+        # 新的實作中 SchedulerService 只需要傳入 scheduled_queue
+        service = SchedulerService(factory, scheduled_queue)
+        service.sync_jobs()
 
         service.dispatch_due_jobs()
 
+        # normal_queue 沒有傳入，一定是空的。scheduled_queue 會有派發的任務。
         assert normal_queue._queue.empty()
         assert scheduled_queue._queue.qsize() == 1
 
@@ -66,8 +80,13 @@ class TestSchedulerService:
         )
         db_session.add(running)
         db_session.commit()
-        service = SchedulerService(db_session, queue, queue)
+
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+
+        service.sync_jobs()
         service.dispatch_due_jobs()
+
         tasks = db_session.query(Task).filter(Task.job_id == job.id).all()
         assert len(tasks) == 1
 
@@ -85,11 +104,16 @@ class TestSchedulerService:
         )
         db_session.add(task)
         db_session.commit()
-        service = SchedulerService(db_session, queue, queue)
+
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+
+        service.sync_jobs()
         recovered = service.recover_orphans()
+
         assert recovered == 1
-        updated = db_session.get(Task, task.id)
-        assert updated.status == "pending"
+        db_session.refresh(task)
+        assert task.status == "pending"
 
     def test_orphan_recovery_does_not_resend_message(self, db_session):
         """recover_orphans 不該主動重塞 message；SQS visibility 過期會自己 surface。"""
@@ -105,7 +129,9 @@ class TestSchedulerService:
         )
         db_session.add(task)
         db_session.commit()
-        service = SchedulerService(db_session, queue, queue)
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+        service.sync_jobs()
         service.recover_orphans()
         # MemoryQueueClient 沒 visibility 概念；確認 queue 是空的，沒被偷塞 message
         assert queue._queue.empty()

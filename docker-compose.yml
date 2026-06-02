@@ -10,6 +10,7 @@ services:
     volumes:
       - dass-postgres-data:/var/lib/postgresql/data
       - ./infra/postgres/init-primary:/docker-entrypoint-initdb.d # 把腳本資料夾對應到 Docker 內部的初始化目錄
+    command: postgres -c max_connections=200 -c shared_buffers=256MB # 加上這一行，把主庫實體椅子開到 200 張！
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dass -d dass"]
       interval: 5s
@@ -24,7 +25,7 @@ services:
 
   postgres-replica:
     image: postgres:16-alpine
-    # 🌟 關鍵：不用官方的開機流程，改用我們寫的影子腳本開機
+    # 關鍵：不用官方的開機流程，改用我們寫的影子腳本開機
     entrypoint: ["/init-script/entrypoint-replica.sh"]
     environment:
       POSTGRES_DB: dass
@@ -44,6 +45,27 @@ services:
     labels:
       com.dass.project: dass
       com.dass.service: postgres-replica
+    
+  pgbouncer:
+    build:
+      context: .
+      dockerfile: Dockerfile.pgbouncer # 放棄去網路拉取，改由本地剛剛寫的 Dockerfile 直接編譯
+    container_name: dass-pgbouncer
+    environment:
+      - DATABASE_URL=postgresql://dass:dass@postgres:5432/dass
+      - PGBOUNCER_PORT=6432
+      - PGBOUNCER_POOL_MODE=transaction  # 核心交易代理
+      - PGBOUNCER_MAX_CLIENT_CONN=1000   # 允許 1000 個微服務排隊
+      - PGBOUNCER_DEFAULT_POOL_SIZE=40   # 實體池緊扣 Postgres 最舒適的 40
+      - PGBOUNCER_MAX_DB_CONNECTIONS=50
+    ports:
+      - "6432:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dass-net
 
   localstack:
     image: localstack/localstack:3
@@ -75,7 +97,7 @@ services:
     env_file:
       - .env
     environment:
-      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@pgbouncer:6432/dass} # 重新定向：埠改打 pgbouncer:6432
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-api-server}
@@ -91,6 +113,8 @@ services:
         condition: service_healthy
       localstack:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started # 確保代理大廳開門了
     restart: unless-stopped
     networks:
       - dass-net
@@ -105,7 +129,7 @@ services:
     env_file:
       - .env
     environment:
-      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@pgbouncer:6432/dass} # 重新定向：埠改打 pgbouncer:6432
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-scheduler}
@@ -114,6 +138,8 @@ services:
         condition: service_healthy
       localstack:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started # 確保代理大廳開門了
     restart: unless-stopped
     networks:
       - dass-net
@@ -129,7 +155,7 @@ services:
     env_file:
       - .env
     environment:
-      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@pgbouncer:6432/dass} # 重新定向：埠改打 pgbouncer:6432
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-autoscaler}
@@ -155,10 +181,11 @@ services:
     env_file:
       - .env
     environment:
-      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
+      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@pgbouncer:6432/dass} # 重新定向：埠改打 pgbouncer:6432
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-worker}
+      DASS_DOCKER_NETWORK: dass_dass-net
     # S4: worker 透過 host docker daemon 起 job container；需要把 docker.sock mount 進來。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
