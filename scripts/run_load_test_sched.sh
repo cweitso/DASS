@@ -6,11 +6,14 @@ echo "====================================="
 echo "   準備 Docker 環境與監控服務 (Grafana)"
 echo "====================================="
 
+cd ..
+
 # 先徹底清理上次的容器與 Volume (資料庫資料) 確保乾淨狀態
 docker compose -f docker-compose.yml -f docker-compose.observability.yml down -v
 
 # 啟動主服務與 Observability (包含 Grafana、Prometheus 等)
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+# add "--build" 參數確保使用最新的 Dockerfile 來建構映像檔
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 
 echo "====================================="
 echo "   暫停 Worker 與 Autoscaler 服務"
@@ -25,7 +28,7 @@ echo "====================================="
 sleep 15
 
 # 切換到 backend 資料夾
-cd backend
+cd backend/self_tests
 
 # run
 DASS_DATABASE_URL="postgresql+psycopg://dass:dass@localhost:5432/dass" uv run python load_gen_scheduler.py
