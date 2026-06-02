@@ -23,7 +23,6 @@ log = logging.getLogger("sqs-exporter")
 
 # ── SQS metrics ──────────────────────────────────────────────────────────────
 QUEUES = [
-    "dass-tasks",
     "dass-tasks-normal",
     "dass-tasks-scheduled",
     "dass-tasks-retry",
