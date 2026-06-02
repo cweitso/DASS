@@ -25,7 +25,7 @@ services:
 
   postgres-replica:
     image: postgres:16-alpine
-    # 🌟 關鍵：不用官方的開機流程，改用我們寫的影子腳本開機
+    # 關鍵：不用官方的開機流程，改用我們寫的影子腳本開機
     entrypoint: ["/init-script/entrypoint-replica.sh"]
     environment:
       POSTGRES_DB: dass

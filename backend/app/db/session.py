@@ -36,7 +36,7 @@ primary_engine = create_engine(
     settings.database_url,
     echo=settings.database_echo,
     pool_pre_ping=True,
-    pool_size=CURRENT_POOL_SIZE,          # 動態注入最精準的椅子數量
+    pool_size=CURRENT_POOL_SIZE,          # 動態注入pool
     max_overflow=CURRENT_MAX_OVERFLOW,    # 動態注入溢出量
     pool_timeout=CURRENT_TIMEOUT,
 )
