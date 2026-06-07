@@ -53,7 +53,7 @@ services:
     volumes:
       - dass-postgres-data:/var/lib/postgresql/data
       - ./infra/postgres/init-primary:/docker-entrypoint-initdb.d # 把腳本資料夾對應到 Docker 內部的初始化目錄
-    command: postgres -c max_connections=100 -c shared_buffers=256MB # 加上這一行，把主庫實體椅子開到 200 張！
+    command: postgres -c max_connections=100 -c shared_buffers=256MB # 主庫上限 100 條連線（直連的 scheduler + 經 pgbouncer 匯流的 api/worker 都收斂在這之下）
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dass -d dass"]
       interval: 5s
@@ -94,13 +94,9 @@ services:
       context: .
       dockerfile: Dockerfile.pgbouncer # 放棄去網路拉取，改由本地剛剛寫的 Dockerfile 直接編譯
     container_name: dass-pgbouncer
-    environment:
-      - DATABASE_URL=postgresql://dass:dass@postgres:5432/dass
-      - PGBOUNCER_PORT=6432
-      - PGBOUNCER_POOL_MODE=transaction  # 核心交易代理
-      - PGBOUNCER_MAX_CLIENT_CONN=1000   # 允許 1000 個微服務排隊
-      - PGBOUNCER_DEFAULT_POOL_SIZE=40   # 實體池緊扣 Postgres 最舒適的 40
-      - PGBOUNCER_MAX_DB_CONNECTIONS=50
+    # 設定全部在 pgbouncer.ini（Dockerfile.pgbouncer 直接 COPY 進 image 並以它啟動）。
+    # alpine 的 pgbouncer 套件不會讀 PGBOUNCER_* / DATABASE_URL 這類環境變數——之前那些
+    # env 完全沒作用、只是擺好看的。要改 pool 大小/模式請改 pgbouncer.ini。
     ports:
       - "6432:6432"
     depends_on:
@@ -181,7 +177,9 @@ services:
     env_file:
       - .env
     environment:
-      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@pgbouncer:6432/dass} # 重新定向：埠改打 pgbouncer:6432
+      # Scheduler 直連 Postgres：pg_advisory_lock 是 session 級鎖，走 pgbouncer
+      # transaction pooling 會在交易結束時把連線還池、鎖跟著飄走，leader 選舉就壞了。
+      DASS_DATABASE_URL: ${DASS_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres:5432/dass}
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-scheduler}
@@ -237,7 +235,7 @@ services:
       DASS_REPLICA_DATABASE_URL: ${DASS_REPLICA_DATABASE_URL:-postgresql+psycopg://dass:dass@postgres-replica:5432/dass}
       DASS_SQS_ENDPOINT_URL: ${DASS_SQS_ENDPOINT_URL:-http://localstack:4566}
       DASS_WORKER_ID: ${DASS_WORKER_ID:-worker}
-      DASS_DOCKER_NETWORK: dass_dass-net
+      DASS_DOCKER_NETWORK: dass_alt_dass-net # compose 專案名是 dass_alt → 實際網路 dass_alt_dass-net（autoscaler clone 此 env 給 worker-as-*）
     # S4: worker 透過 host docker daemon 起 job container；需要把 docker.sock mount 進來。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

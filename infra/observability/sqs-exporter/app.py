@@ -22,10 +22,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("sqs-exporter")
 
 # ── SQS metrics ──────────────────────────────────────────────────────────────
+# 佇列名稱從環境變數讀（跟隨 .env 的 DASS_QUEUE_NAME_*），避免改了佇列名後 exporter
+# 還在抓舊名稱、面板變空。沒設環境變數時退回現行預設值。
 QUEUES = [
-    "dass-tasks-normal",
-    "dass-tasks-scheduled",
-    "dass-tasks-retry",
+    os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
+    os.environ.get("DASS_QUEUE_NAME_SCHEDULED", "dass-tasks-scheduled"),
+    os.environ.get("DASS_QUEUE_NAME_RETRY", "dass-tasks-retry"),
 ]
 
 visible = Gauge("dass_sqs_messages_visible", "Visible SQS messages", ["queue"])

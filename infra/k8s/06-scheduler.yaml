@@ -31,6 +31,14 @@ spec:
         envFrom:
         - configMapRef:
             name: dass-config
+        env:
+        # 覆寫 configMap：scheduler 直連 Postgres(5432)。pg_advisory_lock 是 session 級鎖,
+        # 不能走 pgbouncer transaction pooling(6432),否則 leader 選舉會壞。
+        - name: DASS_DATABASE_URL
+          value: "postgresql+psycopg://dass:dass@host.minikube.internal:5432/dass"
+        # 明確標明身分,讓 db/session.py 的連線池配比走「保守額度」分支(而非預設 api-server)。
+        - name: DASS_WORKER_ID
+          value: "scheduler"
         resources:
           requests:
             cpu: "50m"

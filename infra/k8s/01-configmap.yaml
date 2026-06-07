@@ -4,9 +4,13 @@ metadata:
   name: dass-config
   namespace: dass
 data:
-  # Point at Docker Compose postgres/localstack on the host machine.
+  # Point at Docker Compose postgres/localstack/pgbouncer on the host machine.
   # host.minikube.internal resolves to the bridge IP (192.168.49.1) from inside all pods.
-  DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@host.minikube.internal:5432/dass"
+  # api + worker 走 host 上的 pgbouncer(6432)做連線匯流：KEDA 會把 worker pod 擴到很多個,
+  # 全部直連 Postgres 會超過 max_connections;pgbouncer 把伺服器連線收斂在固定數量。
+  # 例外:scheduler 在 06-scheduler.yaml 覆寫成直連 5432(pg_advisory_lock 是 session 級鎖,
+  # 走 pgbouncer transaction pooling 會失效)。
+  DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@host.minikube.internal:6432/dass"
   DASS_REPLICA_DATABASE_URL: "postgresql+psycopg://dass:dass@host.minikube.internal:5432/dass"
   DASS_SQS_ENDPOINT_URL: "http://host.minikube.internal:4566"
   DASS_QUEUE_BACKEND: "sqs"

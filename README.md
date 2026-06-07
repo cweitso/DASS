@@ -19,8 +19,8 @@
 # 啟動模式二（Docker Compose 基礎服務 + K8s Worker，KEDA 自動擴縮）
 ./infra/start-mode2.sh
 
-# 關閉所有服務（Docker Compose + Minikube）
-./infra/stop-all.sh
+# 完全關閉並清除所有服務（Docker Compose + Minikube，會刪除資料卷）
+./infra/down-all.sh
 
 # 開啟 Grafana 監控
 ./infra/start-grafana.sh          # → http://localhost:3001

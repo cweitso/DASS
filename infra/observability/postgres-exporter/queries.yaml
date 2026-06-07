@@ -30,6 +30,44 @@ dass_tasks_recent_throughput:
         usage: "GAUGE"
         description: "Tasks failed (including final_failed) in the last minute"
 
+# Cumulative, monotonically-increasing task counters.
+#
+# Why these exist: every other task metric here is a GAUGE — a point-in-time
+# snapshot sampled every few seconds. A short task (e.g. `echo hello` finishes
+# in ~200ms) lives in the pending/running/in-flight state for far less than one
+# scrape interval, so the snapshot almost always reads 0 and the task leaves no
+# trace on the dashboard. These counters only ever go up, so even a 200ms task
+# leaves a permanent +1 step in the time series. Derive throughput in Grafana
+# with increase()/rate() — that reliably captures every task regardless of how
+# fast it ran. Tasks are never deleted (retries insert new rows), so the values
+# are genuinely monotonic and safe to expose as COUNTER.
+dass_tasks:
+  query: |
+    SELECT
+      count(*)::float AS created_total,
+      COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0)::float AS succeeded_total,
+      COALESCE(SUM(CASE WHEN status IN ('failed', 'final_failed') THEN 1 ELSE 0 END), 0)::float AS failed_total,
+      COALESCE(SUM(CASE WHEN retry_count > 0 THEN 1 ELSE 0 END), 0)::float AS retried_total,
+      COALESCE(SUM(CASE WHEN status = 'final_failed' THEN 1 ELSE 0 END), 0)::float AS final_failed_total
+    FROM tasks
+  master: true
+  metrics:
+    - created_total:
+        usage: "COUNTER"
+        description: "Cumulative tasks ever created — 1 task == 1 enqueue (includes retries)"
+    - succeeded_total:
+        usage: "COUNTER"
+        description: "Cumulative tasks that reached status=success"
+    - failed_total:
+        usage: "COUNTER"
+        description: "Cumulative tasks that reached status in (failed, final_failed)"
+    - retried_total:
+        usage: "COUNTER"
+        description: "Cumulative retry attempts (tasks with retry_count > 0 — i.e. a re-enqueue of a previously-failed task)"
+    - final_failed_total:
+        usage: "COUNTER"
+        description: "Cumulative tasks that exhausted max_retries (status=final_failed)"
+
 dass_jobs_total:
   query: "SELECT count(*)::float AS count FROM jobs"
   master: true
@@ -40,13 +78,56 @@ dass_jobs_total:
 
 dass_jobs_by_enabled:
   query: |
-    SELECT enabled::text AS enabled, count(*)::float AS count
+    SELECT enabled::text AS enabled, job_type, count(*)::float AS count
     FROM jobs
-    GROUP BY enabled
+    GROUP BY enabled, job_type
   master: true
   metrics:
     - enabled:
         usage: "LABEL"
+    - job_type:
+        usage: "LABEL"
+        description: "Job type (scheduled = cron-driven; normal = on-demand/manual)"
     - count:
         usage: "GAUGE"
-        description: "Jobs by enabled flag"
+        description: "Jobs by enabled flag and job_type"
+
+# Cumulative tasks split by how they were triggered (manual /trigger vs scheduler).
+# A scheduled task is enqueued + consumed in well under one scrape interval, so the
+# SQS 'visible' gauge for dass-tasks-scheduled almost always reads 0. This COUNTER
+# instead leaves a permanent +1 step per dispatch — use it (raw or increase()) to
+# see "one scheduled dispatch == one tick".
+dass_tasks_by_trigger:
+  query: |
+    SELECT trigger_type, count(*)::float AS total
+    FROM tasks
+    GROUP BY trigger_type
+  master: true
+  metrics:
+    - trigger_type:
+        usage: "LABEL"
+        description: "How the task was triggered (manual / scheduled)"
+    - total:
+        usage: "COUNTER"
+        description: "Cumulative tasks ever created with this trigger_type"
+
+# 2D 交叉：job 的型別 × task 的觸發來源（JOIN jobs）。讓「scheduled job 被 trigger-now」
+# (job_type=scheduled, trigger_type=manual) 能跟「一般手動觸發 normal job」
+# (job_type=normal, trigger_type=manual) 分開計數。GAUGE：因 FK 是 ON DELETE CASCADE，
+# 刪 job 時對應 task 會一起消失（數字會掉），所以當「目前快照」用、不當嚴格 counter。
+dass_tasks_by_job_and_trigger:
+  query: |
+    SELECT j.job_type, t.trigger_type, count(*)::float AS count
+    FROM tasks t JOIN jobs j ON j.id = t.job_id
+    GROUP BY j.job_type, t.trigger_type
+  master: true
+  metrics:
+    - job_type:
+        usage: "LABEL"
+        description: "Owning job's type (normal / scheduled)"
+    - trigger_type:
+        usage: "LABEL"
+        description: "How this run was triggered (manual / scheduled)"
+    - count:
+        usage: "GAUGE"
+        description: "Task runs by (job_type, trigger_type) for still-existing jobs"

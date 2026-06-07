@@ -1,249 +1,1085 @@
 {
   "uid": "dass-overview",
   "title": "DASS · Overview",
-  "tags": ["dass"],
+  "tags": [
+    "dass"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 8,
   "refresh": "5s",
-  "time": {"from": "now-15m", "to": "now"},
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
   "panels": [
     {
       "type": "stat",
       "title": "Jobs in DB",
       "id": 1,
-      "gridPos": {"x": 0, "y": 0, "w": 3, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_jobs_total_count", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area", "textMode": "auto"},
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_jobs_total_count",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Active Jobs",
       "id": 99,
-      "gridPos": {"x": 3, "y": 0, "w": 3, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "sum(dass_jobs_by_enabled_count{enabled=\"true\"}) or vector(0)", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area", "textMode": "auto"},
-      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode":"fixed","fixedColor":"blue"}}}
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(dass_jobs_by_enabled_count{enabled=\"true\", job_type=\"scheduled\"}) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        }
+      },
+      "description": "Enabled jobs that the scheduler manages (enabled=true AND job_type='scheduled'). On-demand/normal jobs (no cron — e.g. load-test jobs) are excluded."
     },
     {
       "type": "stat",
       "title": "Tasks pending",
       "id": 2,
-      "gridPos": {"x": 6, "y": 0, "w": 3, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "sum(dass_tasks_by_status_count{status=\"pending\"}) or vector(0)", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area"},
-      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color":"green","value":null},{"color":"orange","value":1000},{"color":"red","value":10000}]}}}
+      "description": "Messages waiting across all SQS queues (ApproximateNumberOfMessages / visible) — the real backlog of tasks enqueued but not yet picked up by a worker. Replaces the old DB status='pending' count, which never drains because task rows are never deleted, so it conflated live backlog with all-time history.",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(dass_sqs_messages_visible) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1000
+              },
+              {
+                "color": "red",
+                "value": 10000
+              }
+            ]
+          }
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Tasks running",
-      "id": 3,
-      "gridPos": {"x": 9, "y": 0, "w": 3, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "sum(dass_tasks_by_status_count{status=\"running\"}) or vector(0)", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area"},
-      "fieldConfig": {"defaults": {"unit": "short"}}
-    },
-    {
-      "type": "stat",
-      "title": "SQS in-flight (all queues)",
       "id": 4,
-      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "sum(dass_sqs_messages_not_visible)", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area"},
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "description": "DB snapshot: rows with status='running' — the single source of truth for 'running'. ≈ (workers × per-worker concurrency) actually claimed into the DB.",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(dass_tasks_by_status_count{status=\"running\"}) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Success/min",
       "id": 5,
-      "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_tasks_recent_throughput_success_per_min", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area"},
-      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode":"fixed","fixedColor":"green"}}}
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "increase(dass_tasks_succeeded_total[1m])",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Failed/min",
       "id": 6,
-      "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_tasks_recent_throughput_failed_per_min", "refId": "A"}],
-      "options": {"colorMode": "value", "graphMode": "area"},
-      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode":"fixed","fixedColor":"red"}}}
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "increase(dass_tasks_failed_total[1m])",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
+        }
+      }
     },
-
+    {
+      "type": "row",
+      "id": 108,
+      "title": "Jobs & task runs",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Jobs (definitions)",
+      "id": 110,
+      "description": "JOB = 工作定義(在 jobs 表)。normal=即時/手動(無 cron);scheduled=有 cron,由排程器管。這裡數的是『現在 DB 裡有幾個 job』。",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "legendFormat": "Normal (on-demand, no cron)",
+          "expr": "sum(dass_jobs_by_enabled_count{job_type=\"normal\"}) or vector(0)"
+        },
+        {
+          "refId": "B",
+          "instant": true,
+          "legendFormat": "Scheduled (cron)",
+          "expr": "sum(dass_jobs_by_enabled_count{job_type=\"scheduled\"}) or vector(0)"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Task runs (executions)",
+      "id": 111,
+      "description": "TASK run 的『來源』:Trigger-now=在 scheduled job 上按 trigger-now(manual on scheduled);Scheduler-dispatched=排程器自動派發。(成功/失敗/重試看下面 Task outcomes。)",
+      "gridPos": {
+        "x": 8,
+        "y": 5,
+        "w": 16,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "legendFormat": "Trigger-now (manual on scheduled job)",
+          "expr": "sum(dass_tasks_by_job_and_trigger_count{job_type=\"scheduled\",trigger_type=\"manual\"}) or vector(0)"
+        },
+        {
+          "refId": "B",
+          "instant": true,
+          "legendFormat": "Scheduler-dispatched",
+          "expr": "sum(dass_tasks_by_trigger_total{trigger_type=\"scheduled\"}) or vector(0)"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 106,
+      "title": "Task throughput (cumulative counters)",
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Task outcomes (cumulative)",
+      "id": 112,
+      "description": "一個失敗 job 的鏈:第1次失敗 → 重試… → 重試用完則放棄(final_failed)。\n• Enqueued = 總共派出幾次執行。• Succeeded = 成功幾次。\n• Failed runs (incl. retries) = 每一次失敗的『執行』,會被中途重試灌水 → 比真正失敗的多。\n• Retries (re-runs) = 其中是『重跑』的次數(retry_count>0)。\n• Final failures (gave up) = 重試用完仍失敗 → 這才是『真正徹底失敗的數量』。\n關係:Failed runs = 第1次就失敗 + 失敗的重試;Final failures ⊆ Failed runs。",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "legendFormat": "Enqueued (every run)",
+          "expr": "sum(dass_tasks_created_total) or vector(0)"
+        },
+        {
+          "refId": "B",
+          "instant": true,
+          "legendFormat": "Succeeded",
+          "expr": "sum(dass_tasks_succeeded_total) or vector(0)"
+        },
+        {
+          "refId": "C",
+          "instant": true,
+          "legendFormat": "Failed runs (incl. retries)",
+          "expr": "sum(dass_tasks_failed_total) or vector(0)"
+        },
+        {
+          "refId": "D",
+          "instant": true,
+          "legendFormat": "Retries (re-runs)",
+          "expr": "sum(dass_tasks_retried_total) or vector(0)"
+        },
+        {
+          "refId": "E",
+          "instant": true,
+          "legendFormat": "Final failures (gave up)",
+          "expr": "sum(dass_tasks_final_failed_total) or vector(0)"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tasks processed (cumulative)",
+      "id": 63,
+      "description": "Monotonic staircase — every enqueued/succeeded/failed task leaves a permanent step, so short tasks are always visible here even though the gauge panels above miss them.",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_tasks_created_total",
+          "legendFormat": "enqueued",
+          "refId": "A"
+        },
+        {
+          "expr": "dass_tasks_succeeded_total",
+          "legendFormat": "succeeded",
+          "refId": "B"
+        },
+        {
+          "expr": "dass_tasks_failed_total",
+          "legendFormat": "failed",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "drawStyle": "line"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduled dispatches (/min)",
+      "id": 107,
+      "description": "Scheduler enqueues per minute, from a cumulative COUNTER (dass_tasks_by_trigger_total{trigger_type='scheduled'}). Unlike the SQS 'visible' gauge — which reads ~0 because each scheduled task is consumed in <1s — this leaves one tick per dispatch.",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "increase(dass_tasks_by_trigger_total{trigger_type=\"scheduled\"}[1m])",
+          "refId": "A",
+          "legendFormat": "scheduled/min"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
     {
       "type": "row",
       "id": 100,
       "title": "Queue depth",
-      "gridPos": {"x": 0, "y": 4, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
       "type": "timeseries",
       "title": "SQS visible messages",
       "id": 10,
-      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_sqs_messages_visible", "legendFormat": "{{queue}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_sqs_messages_visible",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "SQS in-flight messages",
       "id": 11,
-      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_sqs_messages_not_visible", "legendFormat": "{{queue}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+      "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_sqs_messages_not_visible",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      }
     },
-
     {
       "type": "row",
       "id": 104,
       "title": "Worker fleet (autoscaling)",
-      "gridPos": {"x": 0, "y": 13, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
       "type": "timeseries",
       "title": "Worker containers running",
       "id": 50,
-      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"expr": "dass_workers_total", "legendFormat": "total", "refId": "A"},
-        {"expr": "dass_workers_autoscaled", "legendFormat": "autoscaled", "refId": "B"}
+        {
+          "expr": "dass_workers_total",
+          "legendFormat": "total",
+          "refId": "A"
+        },
+        {
+          "expr": "dass_workers_autoscaled",
+          "legendFormat": "autoscaled",
+          "refId": "B"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"fillOpacity": 25, "showPoints": "always", "lineWidth": 2, "drawStyle": "line"}}},
-      "options": {"legend": {"showLegend": true, "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "fillOpacity": 25,
+            "showPoints": "always",
+            "lineWidth": 2,
+            "drawStyle": "line"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Workers now",
       "id": 51,
-      "gridPos": {"x": 12, "y": 14, "w": 6, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_workers_total", "refId": "A"}],
-      "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
-      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color":"blue","value":null},{"color":"green","value":2},{"color":"orange","value":7},{"color":"red","value":10}]}}}
+      "gridPos": {
+        "x": 12,
+        "y": 44,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_workers_total",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 2
+              },
+              {
+                "color": "orange",
+                "value": 7
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Autoscaled (extra)",
       "id": 52,
-      "gridPos": {"x": 18, "y": 14, "w": 6, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_workers_autoscaled", "refId": "A"}],
-      "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
-      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color":"green","value":null},{"color":"orange","value":5},{"color":"red","value":9}]}}}
+      "gridPos": {
+        "x": 18,
+        "y": 44,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_workers_autoscaled",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 9
+              }
+            ]
+          }
+        }
+      }
     },
-
     {
       "type": "row",
       "id": 101,
       "title": "Task pipeline",
-      "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 52,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
       "type": "timeseries",
       "title": "Tasks by status (DB snapshot)",
       "id": 20,
-      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "dass_tasks_by_status_count", "legendFormat": "{{status}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 30, "showPoints": "never", "stacking": {"mode": "normal", "group": "A"}}}},
-      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}}
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "dass_tasks_by_status_count",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Throughput (per minute)",
       "id": 21,
-      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "x": 12,
+        "y": 53,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"expr": "dass_tasks_recent_throughput_success_per_min", "legendFormat": "success/min", "refId": "A"},
-        {"expr": "dass_tasks_recent_throughput_failed_per_min", "legendFormat": "failed/min", "refId": "B"}
+        {
+          "expr": "increase(dass_tasks_succeeded_total[1m])",
+          "legendFormat": "success/min",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(dass_tasks_failed_total[1m])",
+          "legendFormat": "failed/min",
+          "refId": "B"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "placement": "bottom"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        }
+      }
     },
-
     {
       "type": "row",
       "id": 102,
       "title": "Postgres pressure",
-      "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
       "type": "timeseries",
       "title": "Postgres connections (by state)",
       "id": 30,
-      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"expr": "pg_stat_activity_count{datname=\"dass\"}", "legendFormat": "{{state}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}}
+      "gridPos": {
+        "x": 0,
+        "y": 62,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "pg_stat_activity_count{datname=\"dass\"}",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Postgres txn rate (commits + rollbacks /s)",
       "id": 31,
-      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "x": 12,
+        "y": 62,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"expr": "rate(pg_stat_database_xact_commit{datname=\"dass\"}[30s])", "legendFormat": "commit/s", "refId": "A"},
-        {"expr": "rate(pg_stat_database_xact_rollback{datname=\"dass\"}[30s])", "legendFormat": "rollback/s", "refId": "B"}
+        {
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"dass\"}[30s])",
+          "legendFormat": "commit/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_stat_database_xact_rollback{datname=\"dass\"}[30s])",
+          "legendFormat": "rollback/s",
+          "refId": "B"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "placement": "bottom"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        }
+      }
     },
-
     {
       "type": "row",
       "id": 103,
       "title": "Container resources",
-      "gridPos": {"x": 0, "y": 40, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
       "type": "timeseries",
       "title": "CPU usage % per dass container",
       "id": 40,
-      "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{
-        "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"dass_alt-.+\"}[30s])) * 100",
-        "legendFormat": "{{name}}",
-        "refId": "A"
-      }],
-      "fieldConfig": {"defaults": {"unit": "percent", "custom": {"fillOpacity": 15, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"]}}
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"dass_alt-.+\"}[30s])) * 100",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "fillOpacity": 15,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Memory MB per dass container",
       "id": 41,
-      "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{
-        "expr": "container_memory_usage_bytes{name=~\"dass_alt-.+\"} / 1024 / 1024",
-        "legendFormat": "{{name}}",
-        "refId": "A"
-      }],
-      "fieldConfig": {"defaults": {"unit": "decmbytes", "custom": {"fillOpacity": 15, "showPoints": "never"}}},
-      "options": {"legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"]}}
+      "gridPos": {
+        "x": 12,
+        "y": 71,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "container_memory_usage_bytes{name=~\"dass_alt-.+\"} / 1024 / 1024",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "custom": {
+            "fillOpacity": 15,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      }
     }
   ]
 }

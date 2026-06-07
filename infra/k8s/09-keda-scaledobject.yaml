@@ -10,7 +10,7 @@ spec:
   scaleTargetRef:
     name: dass-worker-normal
   minReplicaCount: 1
-  maxReplicaCount: 50
+  maxReplicaCount: 10
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:
@@ -34,7 +34,7 @@ spec:
   scaleTargetRef:
     name: dass-worker-scheduled
   minReplicaCount: 1
-  maxReplicaCount: 50
+  maxReplicaCount: 10
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:
@@ -58,7 +58,7 @@ spec:
   scaleTargetRef:
     name: dass-worker-retry
   minReplicaCount: 1
-  maxReplicaCount: 50
+  maxReplicaCount: 10
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:

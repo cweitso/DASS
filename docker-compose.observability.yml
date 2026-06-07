@@ -107,6 +107,10 @@ services:
       DASS_AWS_ACCESS_KEY_ID: dass
       DASS_AWS_SECRET_ACCESS_KEY: dass
       DASS_SQS_EXPORTER_INTERVAL: "3"
+      # 佇列名稱跟隨 .env，exporter 才不會在改名後抓舊名稱
+      DASS_QUEUE_NAME_NORMAL: ${DASS_QUEUE_NAME_NORMAL:-dass-tasks-normal}
+      DASS_QUEUE_NAME_SCHEDULED: ${DASS_QUEUE_NAME_SCHEDULED:-dass-tasks-scheduled}
+      DASS_QUEUE_NAME_RETRY: ${DASS_QUEUE_NAME_RETRY:-dass-tasks-retry}
     # S5: also polls docker daemon for the worker fleet size → dass_workers_*
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

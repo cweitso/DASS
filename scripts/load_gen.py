@@ -34,7 +34,10 @@ DEFAULT_CA_CERT = REPO_ROOT / "infra" / "traefik" / "pki" / "rootCA.crt"
 
 DEFAULT_PAYLOAD: dict[str, Any] = {
     # 每年才跑一次的 cron — scheduler 不會自動 dispatch；要 dispatch 就 --trigger
-    "cron_expression": "0 0 1 1 *",
+    # "cron_expression": "0 0 1 1 *",
+    # 不帶 cron → 建成 job_type='normal'（即時/手動任務）。scheduler 完全不碰它，
+    # 只透過 --trigger 進 normal queue。這樣壓測 job 不會污染「Active Jobs(enabled+scheduled)」
+    # 的計數，也跟前端真正的定時 job(有 cron → scheduled)清楚區分。
     "action_type": "shell",
     "action_config": {"command": "echo load-gen", "timeout_seconds": 5},
     "enabled": True,
