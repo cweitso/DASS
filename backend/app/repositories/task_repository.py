@@ -6,7 +6,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.task import Task
-from app.models.job import Job
 
 
 class TaskRepository:
@@ -36,11 +35,6 @@ class TaskRepository:
     def list_by_job(self, job_id: str) -> list[Task]:
     
         stmt = select(Task).where(Task.job_id == job_id).order_by(Task.created_at.desc())
-        return list(self.db.scalars(stmt).all())
-
-    def list_recent(self, limit: int = 20) -> list[Task]:
-    
-        stmt = select(Task).order_by(Task.created_at.desc()).limit(limit)
         return list(self.db.scalars(stmt).all())
 
     def count_running_for_job(self, job_id: str) -> int:
@@ -102,7 +96,7 @@ class TaskRepository:
         
 
     def mark_running_expired_pending(self, task: Task) -> Task:
-        
+
         task.status = 'pending'
         task.locked_by = None
         task.locked_until = None
@@ -112,21 +106,6 @@ class TaskRepository:
         return task
 
     def list_expired_running(self, now: datetime) -> list[Task]:
-        
+
         stmt = select(Task).where(Task.status == 'running', Task.locked_until.is_not(None), Task.locked_until < now)
         return list(self.db.scalars(stmt).all())
-    
-    def get_container_spec(self, task_id: str) -> dict | None: # 取得 Task 對應的 Container Spec
-        
-        stmt = (
-            select(Job.action_config)
-            .select_from(Task)
-            .join(Job, Task.job_id == Job.id)
-            .where(
-                Task.id == task_id,
-                Job.action_type == "container" 
-            )
-        )
-        
-        # 執行查詢。如果找到，回傳原生的 dict；找不到或非 container，回傳 None
-        return self.db.execute(stmt).scalar_one_or_none()
