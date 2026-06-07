@@ -112,35 +112,18 @@ class TestJobRepository:
         job_repo.delete(created)
         assert job_repo.get(job_id) is None
 
-    def test_due_jobs_filters_by_enabled_and_timing(self, job_repo, db_session):
-        """due_jobs 只能撈到 enabled=True 且 next_fire_at <= now 的 job。"""
-        now = datetime.now(UTC)
+    def test_list_updated_since_only_returns_scheduled_jobs(self, job_repo, db_session):
+        """scheduler 的增量同步只該撈 job_type='scheduled'，normal job 不進排程器。"""
+        scheduled = _make_job(name="scheduled-job", job_type="scheduled")
+        normal = _make_job(name="normal-job", job_type="normal")
 
-        # 1. Happy path: 已到期 + enabled → 抓得到
-        job_normal = _make_job(name="due-job", next_fire_at=now - timedelta(minutes=1))
-        # 2. Sad path: 雖然到期但被停用 → 不該抓到
-        job_disabled = _make_job(
-            name="disabled-job",
-            enabled=False,
-            next_fire_at=now - timedelta(minutes=1),
-        )
-        # 3. Edge: 尚未到期 → 不該抓到
-        job_future = _make_job(
-            name="future-job",
-            next_fire_at=now + timedelta(minutes=1),
-        )
-        # 4. Edge: 剛好現在這一秒（<= 應該抓到）
-        job_exact_now = _make_job(name="exact-now-job", next_fire_at=now)
-
-        db_session.add_all([job_normal, job_disabled, job_future, job_exact_now])
+        db_session.add_all([scheduled, normal])
         db_session.commit()
 
-        due = job_repo.due_jobs(now)
-        due_ids = {j.id for j in due}
+        synced_ids = {j.id for j in job_repo.list_updated_since(None)}
 
-        assert len(due) == 2
-        assert job_normal.id in due_ids
-        assert job_exact_now.id in due_ids
+        assert scheduled.id in synced_ids
+        assert normal.id not in synced_ids
 
 
 class TestTaskRepository:

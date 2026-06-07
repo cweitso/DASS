@@ -44,7 +44,9 @@ class JobBase(BaseModel):
 
 
 class JobCreate(JobBase):
-    pass
+    # 沒帶 cron → 建成 job_type='normal'（即時/手動任務，scheduler 不碰，只能 /trigger）。
+    # 有帶 cron → scheduled。覆寫成 optional 才能表達「即時任務不需要 cron」。
+    cron_expression: str | None = None
 
 
 class JobUpdate(BaseModel):
@@ -59,7 +61,9 @@ class JobUpdate(BaseModel):
 
 class JobRead(JobBase):
     id: UUID
-    next_fire_at: datetime
+    # normal job 沒有 cron / 下次執行時間，兩者都允許為 null 才能正確序列化回傳。
+    cron_expression: str | None = None
+    next_fire_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -67,13 +71,13 @@ class JobRead(JobBase):
 class JobListItem(BaseModel):
     id: UUID
     name: str
-    cron_expression: str
+    cron_expression: str | None = None  # normal job 無 cron
     action_type: str
     action_config: dict[str, Any]
     enabled: bool
     concurrency_policy: str
     max_retries: int
-    next_fire_at: datetime
+    next_fire_at: datetime | None = None  # normal job 無下次執行時間
     created_at: datetime
     updated_at: datetime
 

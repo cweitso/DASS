@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.job import Job
@@ -52,6 +52,44 @@ class JobRepository:
         # 3. 抽取出物件並轉為清單回傳
         return result.scalars().all()
 
+    def list_paginated(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        enabled: bool | None = None,
+        action_type: str | None = None,
+        concurrency_policy: str | None = None,
+        q: str | None = None,
+    ) -> tuple[list[Job], int]:
+        """SQL 端分頁 + 過濾，回傳 (該頁 jobs, 過濾後總數)。
+
+        取代「撈整張 jobs 表進記憶體再 Python 切片」的舊作法——資料量一大（例如 10k+ jobs）
+        每次列表請求都載入全表會很慢且耗記憶體。過濾、計數、分頁全部下推到 SQL。
+        """
+        conditions = []
+        if enabled is not None:
+            conditions.append(Job.enabled == enabled)
+        if action_type is not None:
+            conditions.append(Job.action_type == action_type)
+        if concurrency_policy is not None:
+            conditions.append(Job.concurrency_policy == concurrency_policy)
+        if q:
+            # func.lower(...).like 在 SQLite / Postgres 都可用（避開 Postgres 限定的 ILIKE）
+            conditions.append(func.lower(Job.name).like(f"%{q.lower()}%"))
+
+        count_stmt = select(func.count()).select_from(Job)
+        if conditions:
+            count_stmt = count_stmt.where(*conditions)
+        total = self.db.scalar(count_stmt) or 0
+
+        stmt = select(Job)
+        if conditions:
+            stmt = stmt.where(*conditions)
+        stmt = stmt.order_by(Job.created_at.desc()).limit(page_size).offset((page - 1) * page_size)
+        jobs = list(self.db.scalars(stmt).all())
+        return jobs, total
+
     def get(self, job_id: str) -> Job | None:
         # 透過主鍵 (Primary Key) 找單一資料，SQLAlchemy 提供了一個專屬的超級捷徑：self.db.get()
         return self.db.get(Job, job_id)
@@ -69,16 +107,12 @@ class JobRepository:
             self.db.refresh(job)
         return job
 
-    def due_jobs(self, now: datetime) -> list[Job]:
-        # 1. 建立查詢語句：選擇 Job -> 加入過濾條件 -> 加入排序 , 5/24 補上鎖定定時任務，排除非定時任務
-        stmt = select(Job).where(Job.job_type == "scheduled", Job.enabled == True, Job.next_fire_at <= now).order_by(Job.next_fire_at.asc())
-
-        result = self.db.execute(stmt)
-        return result.scalars().all()
-
     def list_updated_since(self, since: datetime | None) -> list[Job]:
-        # 不預設過濾 enabled，確保能抓到被停用的任務 (Soft Delete)
-        stmt = select(Job)
+        # 只同步定時任務 (job_type='scheduled') 給 scheduler heap；normal/manual job
+        # 由 API 手動觸發直接進 normal queue，不該被排程器撈進來重複派發。
+        # 不預設過濾 enabled：被停用的定時任務仍要回傳，sync_jobs 才能把它從 cache/heap
+        # 清掉 (Soft Delete / Tombstone)。
+        stmt = select(Job).where(Job.job_type == "scheduled")
 
         # 若有提供 since，則只抓取該時間點之後異動過的任務 (增量拉取)
         if since is not None:

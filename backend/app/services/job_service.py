@@ -81,15 +81,25 @@ class JobService:
         #     # TODO: implement replace semantics explicitly; for now it is accepted but behaves like allow.
         #     pass
 
-        if not croniter.is_valid(payload.cron_expression):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Invalid cron expression",
-            )
-
+        # 有 cron → 定時任務（scheduler 會週期派發）；沒 cron → 即時/手動任務（normal），
+        # scheduler 不碰它（list_updated_since 只撈 job_type='scheduled'），只能靠 API /trigger
+        # 手動觸發進 normal queue。model 已允許 cron_expression / next_fire_at 為 NULL。
         now = utcnow()
+        if payload.cron_expression:
+            if not croniter.is_valid(payload.cron_expression):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid cron expression",
+                )
+            job_type = "scheduled"
+            next_fire_at = next_cron_time(payload.cron_expression, now)
+        else:
+            job_type = "normal"
+            next_fire_at = None
+
         job = Job(
             name=payload.name,
+            job_type=job_type,
             cron_expression=payload.cron_expression,
             action_type=payload.action_type,
             action_config=payload.action_config,
@@ -98,7 +108,7 @@ class JobService:
             enabled=payload.enabled,
             concurrency_policy=payload.concurrency_policy,
             max_retries=payload.max_retries,
-            next_fire_at=next_cron_time(payload.cron_expression, now),
+            next_fire_at=next_fire_at,
         )
 
         return self.jobs.create(job)
@@ -113,23 +123,15 @@ class JobService:
         concurrency_policy: str | None = None,
         q: str | None = None,
     ) -> tuple[list[Job], int]:
-        """列出 Job，支援分頁與篩選。"""
-        jobs = self.jobs.list()
-
-        if enabled is not None:
-            jobs = [job for job in jobs if job.enabled is enabled]
-        if action_type is not None:
-            jobs = [job for job in jobs if job.action_type == action_type]
-        if concurrency_policy is not None:
-            jobs = [job for job in jobs if job.concurrency_policy == concurrency_policy]
-        if q:
-            needle = q.lower()
-            jobs = [job for job in jobs if needle in job.name.lower()]
-
-        total = len(jobs)
-        start = (page - 1) * page_size
-        end = start + page_size
-        return jobs[start:end], total
+        """列出 Job，支援分頁與篩選（過濾/計數/分頁全下推到 SQL）。"""
+        return self.jobs.list_paginated(
+            page=page,
+            page_size=page_size,
+            enabled=enabled,
+            action_type=action_type,
+            concurrency_policy=concurrency_policy,
+            q=q,
+        )
 
     def get_job(self, job_id: str) -> Job:
         """取得單一 Job，不存在則 raise 404。

@@ -23,6 +23,7 @@ def _job(db_session, **overrides):
         enabled=overrides.get("enabled", True),
         concurrency_policy=overrides.get("concurrency_policy", "allow"),
         max_retries=overrides.get("max_retries", 0),
+        job_type=overrides.get("job_type", "scheduled"),
         next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     db_session.add(job)
@@ -70,6 +71,22 @@ class TestSchedulerService:
         # normal_queue 沒有傳入，一定是空的。scheduled_queue 會有派發的任務。
         assert normal_queue._queue.empty()
         assert scheduled_queue._queue.qsize() == 1
+
+    def test_scheduler_ignores_normal_jobs(self, db_session):
+        """job_type='normal' 的 job 即使已到期也不該被 scheduler 派發。
+        手動觸發走 API → normal queue，scheduler 不能重複燒它，否則 task 會雙倍累積。
+        """
+        queue = MemoryQueueClient()
+        job = _job(db_session, job_type="normal")
+
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+
+        service.sync_jobs()
+        created = service.dispatch_due_jobs()
+
+        assert created == 0
+        assert db_session.query(Task).filter(Task.job_id == job.id).count() == 0
 
     def test_concurrency_policy_forbid_skips_running_task(self, db_session):
         """Scheduler should skip job if concurrency_policy=forbid and task is running."""
