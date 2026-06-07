@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     k8s_poll_interval_seconds: float = 2.0
     docker_network: str | None = None
 
+    # 危險的 VM admin API（POST /vms 透過 host docker.sock 起 worker 容器）預設關閉；
+    # 真要手動用時以 DASS_VM_ADMIN_API_ENABLED=true 顯式開啟。autoscaler 不走這個 HTTP
+    # 端點（它直接呼叫 vm_service），所以關掉不影響自動擴縮。
+    vm_admin_api_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
