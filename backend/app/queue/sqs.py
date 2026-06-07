@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 
 import boto3
+from botocore.config import Config
 
 from app.core.config import Settings
 from app.queue.base import QueueMessage
+
+# botocore 預設每個 client 只有 10 條 HTTP 連線。api-server 的 /trigger 是同步端點、
+# 跑在 FastAPI 執行緒池（預設 ~40 緒），又共用同一個 lru_cache 的 client；10 條連線會
+# 把高併發的 send_message 卡成序列化（壓測 trigger 階段的隱形天花板）。開大到能蓋過
+# 執行緒池並留餘裕。
+_MAX_POOL_CONNECTIONS = 50
 
 
 class SQSQueueClient:
@@ -24,6 +31,7 @@ class SQSQueueClient:
             aws_access_key_id=settings.aws_access_key_id,
             aws_secret_access_key=settings.aws_secret_access_key,
             aws_session_token=settings.aws_session_token,
+            config=Config(max_pool_connections=_MAX_POOL_CONNECTIONS),
         )
         self.queue_url = self._resolve_queue_url()
 
