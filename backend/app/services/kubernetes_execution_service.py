@@ -151,6 +151,9 @@ class KubernetesExecutionService:
             logs = self._core_v1.read_namespaced_pod_log(
                 pod_name, self.namespace, container="job"
             )
+            # K8s 的 pod log 是 stdout+stderr 合併後的單一串流,API 無法分離兩者。
+            # 因此把整段 log 當成 stdout 回傳、stderr 留空——這是 K8s 後端的先天限制,
+            # 不是漏接 stderr。Docker 後端(subprocess)才有分離的 stdout/stderr。
             return logs or "", ""
         except Exception:
             logger.exception("Failed to get pod logs for job=%s", job_name)

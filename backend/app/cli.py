@@ -22,8 +22,12 @@ from sqlalchemy import create_engine, text
 logger = logging.getLogger(__name__)
 
 
-# Per spec：一個 worker VM 每條 queue 最多跑幾個 job container
-CONTAINERS_PER_VM = 10
+# 每條 queue pool (normal / scheduled / retry) 各自最多同時跑幾個 job container。
+# 三條 pool 互相獨立，所以「單一 worker」的總並發 = 3 × 此值 = 6。
+# autoscaler 最多開 MAX_VMS(=10) 個 worker → 全艦隊並發上限 = 10 × 6 = 60。
+# (這跟 autoscaler_service.CONTAINERS_PER_VM 是不同維度的數字：那個是 per-VM、
+#  這個是 per-queue-pool，刻意不共用同一常數以免互相牽動。)
+MAX_CONCURRENT_PER_QUEUE = 2
 
 
 def run_scheduler() -> None:
@@ -53,25 +57,6 @@ def run_scheduler() -> None:
             else:
                 logger.debug("[STANDBY] Waiting for leader lock...")
             time.sleep(settings.scheduler_interval_seconds)
-
-    normal_queue = get_normal_queue_client()
-    scheduled_queue = get_scheduled_queue_client()
-
-    while True:
-        try:
-            with SessionLocal() as db:
-                service = SchedulerService(
-                    db,
-                    normal_queue_client=normal_queue,
-                    scheduled_queue_client=scheduled_queue,
-                    worker_visibility_timeout_seconds=settings.worker_visibility_timeout_seconds,
-                )
-                service.recover_orphans()
-                service.dispatch_due_jobs()
-        except Exception as e:
-            logger.error(f"Scheduler cycle failed: {e}")
-
-        time.sleep(settings.scheduler_interval_seconds)
 
 
 def run_autoscaler() -> None:
@@ -117,11 +102,12 @@ def _extract_task_id(body: str) -> str | None:
 
 
 async def _run_dedicated_pool_async(queue, queue_name: str, max_concurrent: int, settings, retry_queue) -> None:
-    """Async worker loop: one event loop handles max_concurrent jobs concurrently.
+    """Async worker loop: one event loop handles max_concurrent jobs for this queue.
 
-    For I/O-bound jobs (e.g. HTTP calls), a single thread can keep max_concurrent
-    containers running at once — none of them block each other while waiting for
-    network responses. Previously, each in-flight job blocked one OS thread.
+    Each queue (normal / scheduled / retry) gets its own dedicated pool with an
+    independent semaphore, so a slow/empty queue never starves the others. For
+    I/O-bound jobs (e.g. HTTP calls), the single event loop keeps max_concurrent
+    containers running at once without one blocking another on the network.
     """
     semaphore = asyncio.Semaphore(max_concurrent)
     active_count = 0
@@ -210,16 +196,19 @@ def run_worker(queue: str | None = None) -> None:
     )
 
     logger.info(
-        "Worker '%s' started. pools=%d, max_concurrent_per_pool=%d, queues=%s",
+        "Worker '%s' started. pools=%d, max_concurrent_per_queue=%d (worker total=%d), queues=%s",
         settings.worker_id,
         len(queues_to_run),
-        CONTAINERS_PER_VM,
+        MAX_CONCURRENT_PER_QUEUE,
+        MAX_CONCURRENT_PER_QUEUE * len(queues_to_run),
         [name for name, _ in queues_to_run],
     )
 
     async def _run_all_pools() -> None:
+        # 每條 queue 各自一個 pool、各自一份並發額度 (MAX_CONCURRENT_PER_QUEUE)，
+        # 互不搶佔；單 worker 總並發 = pool 數 × MAX_CONCURRENT_PER_QUEUE。
         await asyncio.gather(*[
-            _run_dedicated_pool_async(q, name, CONTAINERS_PER_VM, settings, retry_queue)
+            _run_dedicated_pool_async(q, name, MAX_CONCURRENT_PER_QUEUE, settings, retry_queue)
             for name, q in queues_to_run
         ])
 
