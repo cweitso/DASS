@@ -196,3 +196,55 @@ class TestSchedulerService:
 
         # 驗證這個新的 Task 有被正確推入 Queue 準備執行
         assert queue._queue.qsize() == 1
+
+    def test_chaining_propagates_one_level_per_success(self, db_session):
+        """A→B→C：A 成功只觸發 B；要等 B 也成功才觸發 C（一次傳播一層）。"""
+        queue = MemoryQueueClient()
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+
+        a = _job(db_session, name="A")
+        b = _job(db_session, name="B")
+        c = _job(db_session, name="C")
+        a.downstream_jobs.append(b)
+        b.downstream_jobs.append(c)
+        db_session.commit()
+
+        task_a = Task(job_id=str(a.id), status="success", trigger_type="scheduled",
+                      retry_count=0, processed_for_chaining=False)
+        db_session.add(task_a)
+        db_session.commit()
+
+        # A 成功 → 只觸發 B
+        assert service.trigger_dependent_jobs() == 1
+        b_tasks = db_session.query(Task).filter(Task.job_id == b.id).all()
+        assert len(b_tasks) == 1 and b_tasks[0].trigger_type == "dependency"
+        assert db_session.query(Task).filter(Task.job_id == c.id).count() == 0
+
+        # B 也成功 → 才觸發 C
+        b_tasks[0].status = "success"
+        b_tasks[0].processed_for_chaining = False
+        db_session.commit()
+        assert service.trigger_dependent_jobs() == 1
+        assert db_session.query(Task).filter(Task.job_id == c.id).count() == 1
+
+    def test_chaining_cycle_does_not_loop_forever(self, db_session):
+        """A↔B 互為上下游時，單一成功事件只觸發有限次，不會自我延續成無限迴圈。"""
+        queue = MemoryQueueClient()
+        factory = sessionmaker(bind=db_session.get_bind())
+        service = SchedulerService(factory, queue)
+
+        a = _job(db_session, name="A")
+        b = _job(db_session, name="B")
+        a.downstream_jobs.append(b)
+        b.downstream_jobs.append(a)  # cycle
+        db_session.commit()
+
+        db_session.add(Task(job_id=str(a.id), status="success", trigger_type="scheduled",
+                            retry_count=0, processed_for_chaining=False))
+        db_session.commit()
+
+        # A 成功 → 觸發 B 一次；A 的 task 標記 processed 後不會再被撈
+        assert service.trigger_dependent_jobs() == 1
+        # 沒有新的「未處理的成功 task」→ 0，證明不會無限迴圈
+        assert service.trigger_dependent_jobs() == 0
