@@ -6,7 +6,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 8,
+  "version": 9,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -17,6 +17,7 @@
       "type": "stat",
       "title": "Jobs in DB",
       "id": 1,
+      "description": "jobs 表的『全部』job 定義總數 = Normal + Scheduled（見下方 Jobs (definitions) 拆分）。會跟 Normal 數字相同，只是因為目前 Scheduled = 0；一旦有排程 job，這個總數就會比 Normal 大。",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -46,7 +47,7 @@
     },
     {
       "type": "stat",
-      "title": "Active Jobs",
+      "title": "Scheduler DB jobs",
       "id": 99,
       "gridPos": {
         "x": 4,
@@ -60,7 +61,7 @@
       },
       "targets": [
         {
-          "expr": "sum(dass_jobs_by_enabled_count{enabled=\"true\", job_type=\"scheduled\"}) or vector(0)",
+          "expr": "sum(dass_scheduler_jobs_upcoming_count) or vector(0)",
           "refId": "A"
         }
       ],
@@ -78,7 +79,7 @@
           }
         }
       },
-      "description": "Enabled jobs that the scheduler manages (enabled=true AND job_type='scheduled'). On-demand/normal jobs (no cron — e.g. load-test jobs) are excluded."
+      "description": "排程器目前手上、還沒到觸發時間的 job 數：enabled 的 scheduled job 中 next_fire_at >= now（heap 裡已武裝、等著被觸發的）。逾期未派發（next_fire_at < now）與 on-demand/normal job 都排除。"
     },
     {
       "type": "stat",
@@ -245,7 +246,7 @@
       "type": "stat",
       "title": "Jobs (definitions)",
       "id": 110,
-      "description": "JOB = 工作定義(在 jobs 表)。normal=即時/手動(無 cron);scheduled=有 cron,由排程器管。這裡數的是『現在 DB 裡有幾個 job』。",
+      "description": "JOB = 工作定義(在 jobs 表)。normal=即時/手動(無 cron);scheduled=有 cron,由排程器管。Normal + Scheduled 相加 = 上方『Jobs in DB』總數。(Scheduled 中『還沒到點、armed』的數量見上方『Scheduler DB jobs (next ≥ now)』。)",
       "gridPos": {
         "x": 0,
         "y": 5,
@@ -523,7 +524,7 @@
     {
       "type": "row",
       "id": 100,
-      "title": "Queue depth",
+      "title": "Live task counts (DB, by queue)",
       "gridPos": {
         "x": 0,
         "y": 34,
@@ -534,8 +535,9 @@
     },
     {
       "type": "timeseries",
-      "title": "SQS visible messages",
+      "title": "Tasks waiting (pending, by queue)",
       "id": 10,
+      "description": "目前『等待中』的 task 確切數量（DB status='pending'），依實際路由的佇列分桶（normal/retry/scheduled）。取代原本的 SQS visible『積壓』gauge — 因 task 在一個 scrape interval 內就被消化掉，SQS gauge 幾乎永遠 0。閒置時三條線都會在 0（buckets 補 0），有負載時才會抬升。",
       "gridPos": {
         "x": 0,
         "y": 35,
@@ -548,7 +550,7 @@
       },
       "targets": [
         {
-          "expr": "dass_sqs_messages_visible",
+          "expr": "dass_tasks_active_by_queue_count{status=\"pending\"}",
           "legendFormat": "{{queue}}",
           "refId": "A"
         }
@@ -576,8 +578,9 @@
     },
     {
       "type": "timeseries",
-      "title": "SQS in-flight messages",
+      "title": "Tasks in-flight (running, by queue)",
       "id": 11,
+      "description": "目前『執行中』的 task 確切數量（DB status='running'，已被 worker claim），依實際路由的佇列分桶（normal/retry/scheduled）。取代原本的 SQS in-flight gauge。閒置時三條線都會在 0（buckets 補 0），有負載時才會抬升。",
       "gridPos": {
         "x": 12,
         "y": 35,
@@ -590,7 +593,7 @@
       },
       "targets": [
         {
-          "expr": "dass_sqs_messages_not_visible",
+          "expr": "dass_tasks_active_by_queue_count{status=\"running\"}",
           "legendFormat": "{{queue}}",
           "refId": "A"
         }

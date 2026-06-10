@@ -111,6 +111,73 @@ dass_tasks_by_trigger:
         usage: "COUNTER"
         description: "Cumulative tasks ever created with this trigger_type"
 
+# Scheduler「目前手上、還沒到點」的 job 數：enabled 的 scheduled job 中，next_fire_at
+# 仍在現在或未來（>= NOW()）。這就是排程器 heap 裡『已武裝、等著被觸發』的 job 數量。
+# 穩態下每個 enabled scheduled job 觸發後 next_fire_at 會被重算到下一個 cron 時間（未來），
+# 所以這個數 ≈ 由排程器管的 scheduled job 數；只有當排程器落後 / job 剛 enable 還沒算下次時間
+# 時才會把 next_fire_at < NOW() 的『逾期』job 排除掉。GAUGE，當『目前快照』用。
+dass_scheduler_jobs_upcoming:
+  query: |
+    SELECT count(*)::float AS count
+    FROM jobs
+    WHERE enabled = true
+      AND job_type = 'scheduled'
+      AND next_fire_at IS NOT NULL
+      AND next_fire_at >= NOW()
+  master: true
+  metrics:
+    - count:
+        usage: "GAUGE"
+        description: "Enabled scheduled jobs armed in the scheduler (next_fire_at >= now)"
+
+# 「目前真的還在系統裡」的 task 數，依『實際被送進哪個佇列』分桶（normal / retry / scheduled）。
+# 為什麼不用 SQS 的 visible/not_visible：scheduled task 在一個 scrape interval 內就被消化掉，
+# SQS gauge 幾乎永遠讀 0，看不出真實負載。這裡直接從 DB 數 pending(等待中) / running(執行中)，
+# 才是『目前確切的 job 數』而非積壓。
+# 分桶規則（依實際 send_task 去向，互斥、有優先序）：
+#   1. retry_count > 0            → retry queue（被重試 re-enqueue 到 retry queue，準確）
+#   2. trigger_type='scheduled' 且 job 為 scheduled → scheduled queue（排程器週期派發）
+#   3. 其餘                        → normal queue（手動 /trigger + normal job 建立即發）
+# 註：normal job 建立時自動發射雖然 trigger_type 標成 'scheduled'，但因 job_type='normal'，
+#     會正確落在 normal 桶。分桶無法 100% 還原物理佇列（DB 沒存佇列名），但這是最佳近似。
+# 用 buckets CROSS JOIN 補 0，確保三個佇列 × pending/running 永遠各有一條線（即使閒置為 0），
+# 維持原本 SQS 面板「三條 per-queue 折線 + lastNotNull/max 統計」的呈現。
+dass_tasks_active_by_queue:
+  query: |
+    WITH buckets AS (
+      SELECT q.queue, s.status
+      FROM (VALUES ('normal'), ('retry'), ('scheduled')) AS q(queue)
+      CROSS JOIN (VALUES ('pending'), ('running')) AS s(status)
+    ),
+    counts AS (
+      SELECT
+        CASE
+          WHEN t.retry_count > 0 THEN 'retry'
+          WHEN t.trigger_type = 'scheduled' AND j.job_type = 'scheduled' THEN 'scheduled'
+          ELSE 'normal'
+        END AS queue,
+        t.status,
+        count(*)::float AS count
+      FROM tasks t
+      JOIN jobs j ON j.id = t.job_id
+      WHERE t.status IN ('pending', 'running')
+      GROUP BY 1, t.status
+    )
+    SELECT b.queue, b.status, COALESCE(c.count, 0)::float AS count
+    FROM buckets b
+    LEFT JOIN counts c ON c.queue = b.queue AND c.status = b.status
+  master: true
+  metrics:
+    - queue:
+        usage: "LABEL"
+        description: "Logical queue the task was routed to (normal / retry / scheduled)"
+    - status:
+        usage: "LABEL"
+        description: "Task status (pending = waiting, running = in-flight)"
+    - count:
+        usage: "GAUGE"
+        description: "Tasks currently in this (queue, status) — live count from DB, not SQS backlog"
+
 # 2D 交叉：job 的型別 × task 的觸發來源（JOIN jobs）。讓「scheduled job 被 trigger-now」
 # (job_type=scheduled, trigger_type=manual) 能跟「一般手動觸發 normal job」
 # (job_type=normal, trigger_type=manual) 分開計數。GAUGE：因 FK 是 ON DELETE CASCADE，
