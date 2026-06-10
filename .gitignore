@@ -29,3 +29,5 @@ Thumbs.db
 
 # ─── Logs ─────────────────────────────────
 *.log
+# integration test HTML reports
+backend/test-reports/

@@ -52,20 +52,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-      postgres-scheduler:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: dass_scheduler
-          POSTGRES_USER: dass
-          POSTGRES_PASSWORD: dass
-        ports:
-          - 5433:5432
-        options: >-
-          --health-cmd "pg_isready -U dass -d dass_scheduler"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
       localstack:
         image: localstack/localstack:3
         env:
@@ -81,7 +67,6 @@ jobs:
 
     env:
       DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@localhost:5432/dass_test"
-      DASS_SCHEDULER_DB_URL: "postgresql+psycopg://dass:dass@localhost:5433/dass_scheduler"
       DASS_DATABASE_REPLICA_URL: "postgresql+psycopg://dass:dass@localhost:5432/dass_test"
       DASS_SQS_ENDPOINT_URL: "http://localhost:4566"
       DASS_QUEUE_NAME: "dass-tasks"
@@ -131,13 +116,8 @@ jobs:
           done
           echo "SQS queues created"
 
-      - name: Run DB migrations (Main DB)
+      - name: Run DB migrations
         run: uv run alembic upgrade head
-
-      - name: Run DB migrations (Scheduler DB)
-        run: uv run alembic upgrade head
-        env:
-          DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@localhost:5433/dass_scheduler"
 
       - name: Run integration tests
         run: |
