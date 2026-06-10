@@ -93,7 +93,7 @@ echo "=== [1/8] 啟動 Docker Compose 基礎服務（不含 worker）==="
 [ -f .env ] || cp .env.example .env
 
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d \
-  postgres postgres-replica pgbouncer localstack api-server scheduler frontend
+  traefik-pki traefik postgres postgres-replica pgbouncer localstack api-server scheduler frontend
 
 echo "等待 api-server healthy..."
 deadline=$((SECONDS + 120))
@@ -216,6 +216,7 @@ kubectl get scaledobject -n dass
 echo ""
 echo "  Frontend  : http://localhost:3000"
 echo "  API       : http://localhost:8000"
+echo "  Traefik   : https://dass.localhost:8443/  (HTTPS 公開入口；憑證鏈 infra/traefik/pki/rootCA.crt)"
 echo "  Grafana   : http://localhost:3001"
 echo "    Mode 2 Dashboard : http://localhost:3001/d/dass-k8s"
 echo ""
