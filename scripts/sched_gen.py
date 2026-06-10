@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """Scheduled-dispatch stress test for DASS.
 
-Creates N *scheduled* jobs (cron `* * * * *` → due every minute) and then does
-NOTHING else — it lets the SCHEDULER dispatch them. At each minute boundary the
-scheduler fires all N jobs at once into the scheduled queue (dass-tasks-scheduled),
-giving an N-per-minute burst that exercises the real scheduler → scheduled queue
+Creates N *scheduled* jobs (cron `*/2 * * * *` → due every 2 minutes) and then
+does NOTHING else — it lets the SCHEDULER dispatch them. At each 2-minute boundary
+the scheduler fires all N jobs at once into the scheduled queue (dass-tasks-scheduled),
+giving an N-per-2-min burst that exercises the real scheduler → scheduled queue
 → worker (scheduled pool) path.
 
 This is the opposite of load_gen: load_gen manually /triggers jobs, which creates
 trigger_type='manual' tasks in the *normal* queue. Here nothing is triggered by
 hand — every run is a trigger_type='scheduled' task produced by the scheduler.
 
+The jobs are LEFT RUNNING (no auto-cleanup). cron `*/2 * * * *` fires forever, so
+delete a run yourself when done with --cleanup --prefix (the script prints the exact
+command after creating).
+
 Watch on Grafana (DASS · Overview):
-  - "Scheduled dispatches (/min)"  → spikes to ~N each minute
+  - "Scheduled dispatches (/min)"  → spikes to ~N every 2 min
   - dass-tasks-scheduled line in "SQS visible / in-flight messages"
   - "Scheduled jobs" + "Scheduler runs" in the "Jobs & task mix" panel
 
-⚠ cron `* * * * *` fires FOREVER. By default this watches for --watch seconds,
-then DELETES every job it created. Pass --keep to leave them running (remember to
-clean them up yourself, or Active Jobs / scheduled load stays elevated).
-
 Usage:
-  scripts/sched_gen.py --count 200 --insecure        # 200 jobs, watch ~2 min, then cleanup
-  scripts/sched_gen.py --count 500 --keep            # leave them firing every minute
-  scripts/sched_gen.py --cleanup --prefix sched-123  # delete a previous run's jobs
+  uv --project backend run python scripts/sched_gen.py --count 200 --insecure                  # create 200, leave running
+  uv --project backend run python scripts/sched_gen.py --cleanup --prefix sched-123 --insecure # delete a previous run
 """
 
 from __future__ import annotations
@@ -44,8 +43,8 @@ DEFAULT_CA_CERT = REPO_ROOT / "infra" / "traefik" / "pki" / "rootCA.crt"
 def _payload(name: str) -> dict[str, Any]:
     return {
         "name": name,
-        # 帶 cron → job_type='scheduled'。每分鐘 due 一次,由 scheduler 派發進 scheduled queue。
-        "cron_expression": "* * * * *",
+        # 帶 cron → job_type='scheduled'。每 2 分鐘 due 一次,由 scheduler 派發進 scheduled queue。
+        "cron_expression": "*/5 * * * *",
         "action_type": "shell",
         "action_config": {"command": "echo scheduled-load", "timeout_seconds": 5},
         "enabled": True,
@@ -89,8 +88,6 @@ async def amain() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--count", type=int, default=200, help="number of scheduled jobs to create (default 200)")
     p.add_argument("--concurrency", type=int, default=32, help="parallel HTTP requests (default 32)")
-    p.add_argument("--watch", type=int, default=140, help="seconds to let the scheduler fire before cleanup (default 140 ≈ 2 boundaries)")
-    p.add_argument("--keep", action="store_true", help="do NOT delete the jobs afterwards (they keep firing every minute)")
     p.add_argument("--cleanup", action="store_true", help="only delete jobs matching --prefix, then exit")
     p.add_argument("--api", default="https://dass.localhost:8443", help="API base URL")
     p.add_argument("--ca-cert", default=str(DEFAULT_CA_CERT), help="CA bundle to trust")
@@ -117,8 +114,8 @@ async def amain() -> int:
             print("done.")
             return 0
 
-        print(f"target={args.api}  count={args.count:,}  cron='* * * * *'  prefix={prefix}")
-        print("watch http://localhost:3001/d/dass-overview → 'Scheduled dispatches (/min)' should spike each minute\n")
+        print(f"target={args.api}  count={args.count:,}  cron='*/2 * * * *'  prefix={prefix}")
+        print("watch http://localhost:3001/d/dass-overview → 'Scheduled dispatches (/min)' should spike every 2 min\n")
 
         ids: list[str] = []
 
@@ -131,20 +128,9 @@ async def amain() -> int:
         start = time.time()
         await asyncio.gather(*(mk(i) for i in range(args.count)))
         print(f"  created {len(ids)}/{args.count} scheduled jobs in {time.time() - start:.1f}s")
-        print(f"  the scheduler will dispatch ~{len(ids)} tasks/min into dass-tasks-scheduled.")
-
-        if args.keep:
-            print(f"\n  --keep set: jobs left running. Clean up later with:")
-            print(f"    scripts/sched_gen.py --cleanup --prefix {prefix} {'--insecure' if args.insecure else ''}")
-            return 0
-
-        print(f"\n  watching {args.watch}s, then deleting these jobs (use --keep to leave them)...")
-        for remaining in range(args.watch, 0, -10):
-            print(f"    cleanup in {remaining:>4}s ...", end="\r", flush=True)
-            await asyncio.sleep(min(10, remaining))
-        print("\n  deleting...")
-        res = await asyncio.gather(*(_delete(client, args.api, j) for j in ids))
-        print(f"  deleted {sum(res)}/{len(ids)} jobs. scheduled-load test done.")
+        print(f"  the scheduler will dispatch ~{len(ids)} tasks every 2 min into dass-tasks-scheduled.")
+        print(f"\n  jobs left running (no auto-cleanup). Delete this run later with:")
+        print(f"    uv --project backend run python scripts/sched_gen.py --cleanup --prefix {prefix} {'--insecure' if args.insecure else ''}")
 
     return 0
 

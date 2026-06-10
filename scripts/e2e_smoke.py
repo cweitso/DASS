@@ -229,7 +229,9 @@ def check_components(api_base: str, report: Report, ssl_context: ssl.SSLContext 
     # SQS queues exist (via LocalStack list-queues endpoint)
     try:
         status, body = http_get("http://localhost:4566/000000000000/?Action=ListQueues")
-        queue_names = ("dass-tasks-normal", "dass-tasks-retry")
+        # The three queues the dispatch paths actually use (queue/factory.py):
+        # normal = manual/triggered, scheduled = scheduler-dispatched, retry = re-runs.
+        queue_names = ("dass-tasks-normal", "dass-tasks-scheduled", "dass-tasks-retry")
         for q in queue_names:
             if q in body:
                 report.add_component(CheckResult(f"queue: {q}", "ok", "exists"))
@@ -258,9 +260,11 @@ def run_pipeline(api_base: str, report: Report, ssl_context: ssl.SSLContext | No
     header("Phase 2 ── End-to-End: create job → trigger → watch task")
 
     job_name = f"e2e-smoke-{uuid.uuid4().hex[:8]}"
+    # No cron_expression → created as a *normal* (on-demand) job: the scheduler
+    # never touches it, we fire it ourselves via /trigger below. This mirrors how
+    # a user runs a one-off job today, instead of parking a yearly cron in the DB.
     payload = {
         "name": job_name,
-        "cron_expression": "0 0 1 1 *",  # once a year — we'll trigger manually
         "action_type": "shell",
         "action_config": {"command": "echo hello-from-e2e", "timeout_seconds": 5},
         "enabled": True,
@@ -349,9 +353,11 @@ def run_pipeline(api_base: str, report: Report, ssl_context: ssl.SSLContext | No
             print(c(f"    stdout: {stdout[:300]}", DIM))
         # heuristic diagnosis
         if "runtime_spec" in stderr or "ContainerSpec" in stderr or "image" in stderr.lower():
-            print(c("    diagnosis: ExecutionService got no valid ContainerSpec.", RED))
-            print(c("              WorkerService reads job.runtime_spec which is not a", DIM))
-            print(c("              column on Job — only action_config exists.", DIM))
+            print(c("    diagnosis: worker couldn't build or run a ContainerSpec for this job.", RED))
+            print(c("              job.runtime_spec is derived from action_config by", DIM))
+            print(c("              JobService._build_runtime_spec at create/update time —", DIM))
+            print(c("              check that mapping, then the worker's ExecutionService", DIM))
+            print(c("              and whether the runner image is pullable.", DIM))
 
 
 # ── Verdict ─────────────────────────────────────────────────────────────────
