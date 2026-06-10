@@ -46,7 +46,8 @@ def test_create_job_without_cron_becomes_one_time_job(client, db_session):
 
     task = db_session.query(Task).filter_by(job_id=job.id).one()
     assert task.status == "pending"
-    assert task.trigger_type == "scheduled"
+    # 建立即執行的隨需觸發 → manual（scheduler 沒參與，不可標 scheduled）。
+    assert task.trigger_type == "manual"
 
     messages = client.app.state.normal_queue_client.receive_tasks(max_messages=1, wait_time_seconds=0)
     assert len(messages) == 1

@@ -138,12 +138,15 @@ class JobService:
 
         job = self.jobs.create(job)
 
-        # 建立普通的單次任務 (normal job) 時，如果它沒有任何上游依賴，就直接發射它
+        # 建立普通的單次任務 (normal job) 時，如果它沒有任何上游依賴，就直接發射它。
+        # 這是「建立即執行」的隨需觸發，scheduler 完全沒參與，所以 trigger_type 標 manual。
+        # 不可標 scheduled——否則會被當成排程器派發，污染 dashboard 的 Scheduler-dispatched /
+        # Scheduled dispatches(/min)指標（那兩個面板查的就是 trigger_type="scheduled"）。
         if job.job_type == "normal" and job.enabled and not job.upstream_jobs:
             task = Task(
                 job_id=str(job.id),
                 status="pending",
-                trigger_type="scheduled",
+                trigger_type="manual",
                 retry_count=0,
             )
             task = self.tasks.create(task)
