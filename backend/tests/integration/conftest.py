@@ -30,33 +30,9 @@ def main_engine():
     engine.dispose()
 
 
-@pytest.fixture(scope="session")
-def scheduler_engine():
-    url = os.environ.get(
-        "DASS_SCHEDULER_DB_URL",
-        "postgresql+psycopg://dass:dass@localhost:5433/dass_scheduler",
-    )
-    engine = create_engine(url, future=True)
-    Base.metadata.create_all(engine)
-    yield engine
-    engine.dispose()
-
-
 @pytest.fixture
 def main_db(main_engine):
     conn = main_engine.connect()
-    txn = conn.begin()
-    Session = sessionmaker(bind=conn, expire_on_commit=False)
-    session = Session()
-    yield session
-    session.close()
-    txn.rollback()
-    conn.close()
-
-
-@pytest.fixture
-def scheduler_db(scheduler_engine):
-    conn = scheduler_engine.connect()
     txn = conn.begin()
     Session = sessionmaker(bind=conn, expire_on_commit=False)
     session = Session()
