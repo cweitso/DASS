@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../.."
 
 # 確保所有服務都跑著 (不會清空資料庫，也不會停掉 Worker)
 # 因為我們的測試需要 Worker 實際去執行 Job A 與 B，Scheduler 才能繼續觸發下游的 C！
-docker compose -f docker-compose.yml up -d --build postgres localstack pgbouncer scheduler worker
+docker compose -f docker-compose.yml up -d --build postgres localstack pgbouncer api-server scheduler worker
 
 echo "==============================================="
 echo "   等待服務就緒... (3秒)"

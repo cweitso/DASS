@@ -44,7 +44,7 @@ class TestSchedulerService:
 
         # 建立一個測試用的連線工廠，綁定到目前的測試資料庫引擎
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         service.sync_jobs()
         created = service.dispatch_due_jobs()
@@ -63,7 +63,7 @@ class TestSchedulerService:
 
         factory = sessionmaker(bind=db_session.get_bind())
         # 新的實作中 SchedulerService 只需要傳入 scheduled_queue
-        service = SchedulerService(factory, scheduled_queue)
+        service = SchedulerService(factory, scheduled_queue, scheduled_queue)
         service.sync_jobs()
 
         service.dispatch_due_jobs()
@@ -80,7 +80,7 @@ class TestSchedulerService:
         job = _job(db_session, job_type="normal")
 
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         service.sync_jobs()
         created = service.dispatch_due_jobs()
@@ -99,7 +99,7 @@ class TestSchedulerService:
         db_session.commit()
 
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         service.sync_jobs()
         service.dispatch_due_jobs()
@@ -123,7 +123,7 @@ class TestSchedulerService:
         db_session.commit()
 
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         service.sync_jobs()
         recovered = service.recover_orphans()
@@ -147,7 +147,7 @@ class TestSchedulerService:
         db_session.add(task)
         db_session.commit()
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
         service.sync_jobs()
         service.recover_orphans()
         # MemoryQueueClient 沒 visibility 概念；確認 queue 是空的，沒被偷塞 message
@@ -157,7 +157,7 @@ class TestSchedulerService:
         """Scheduler 應該能偵測剛成功的 Task，並觸發其相依的下游 Job (downstream_jobs)。"""
         queue = MemoryQueueClient()
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         # 1. 建立下游 Job B
         job_b = _job(db_session, name="Job B")
@@ -201,7 +201,7 @@ class TestSchedulerService:
         """A→B→C：A 成功只觸發 B；要等 B 也成功才觸發 C（一次傳播一層）。"""
         queue = MemoryQueueClient()
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         a = _job(db_session, name="A")
         b = _job(db_session, name="B")
@@ -232,7 +232,7 @@ class TestSchedulerService:
         """A↔B 互為上下游時，單一成功事件只觸發有限次，不會自我延續成無限迴圈。"""
         queue = MemoryQueueClient()
         factory = sessionmaker(bind=db_session.get_bind())
-        service = SchedulerService(factory, queue)
+        service = SchedulerService(factory, queue, queue)
 
         a = _job(db_session, name="A")
         b = _job(db_session, name="B")

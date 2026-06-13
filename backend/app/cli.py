@@ -34,13 +34,17 @@ def run_scheduler() -> None:
     """啟動 Scheduler 主迴圈：dispatch due jobs + recover orphans。"""
     settings = get_settings()
     configure_logging(level=settings.log_level)
-    queue_client = get_scheduled_queue_client()
+    normal_queue = get_normal_queue_client()
+    scheduled_queue = get_scheduled_queue_client()
     lock_engine = create_engine(settings.database_url, pool_size=1, max_overflow=0)
     LOCK_KEY = 114514
 
     with lock_engine.connect() as lock_conn:
         service = SchedulerService(
-            SessionLocal, queue_client, settings.worker_visibility_timeout_seconds
+            SessionLocal,
+            scheduled_queue,
+            normal_queue,
+            settings.worker_visibility_timeout_seconds,
         )
         while True:
             is_leader = lock_conn.execute(
