@@ -207,7 +207,7 @@ def test_enabling_disabled_one_time_job_triggers_it(client, db_session):
     tasks = db_session.query(Task).filter_by(job_id=job.id).all()
     assert len(tasks) == 1
     assert tasks[0].status == "pending"
-    assert tasks[0].trigger_type == "scheduled"
+    assert tasks[0].trigger_type == "manual"
 
     messages = client.app.state.normal_queue_client.receive_tasks(max_messages=1, wait_time_seconds=0)
     assert len(messages) == 1

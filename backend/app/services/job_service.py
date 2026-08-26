@@ -1,33 +1,47 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from croniter import croniter
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.job import Job
 from app.models.task import Task
+from app.queue.factory import get_normal_queue_client
 from app.repositories.job_repository import JobRepository
 from app.repositories.task_repository import TaskRepository
-from app.queue.factory import get_normal_queue_client
 from app.schemas.job import HttpActionConfig, JobCreate, JobUpdate, ShellActionConfig
 from app.utils.cron import next_cron_time
 from app.utils.time import utcnow
 
-
-# S4: 給 action_type 對應的 base image。內部 scheduler，固定鏡像即可
+# Fixed base images per action type. This is an internal scheduler, so the images
+# are pinned here rather than exposed to job authors.
 _SHELL_IMAGE = "alpine:3"
 _HTTP_IMAGE = "curlimages/curl:8.6.0"
 
+_ACTION_CONFIG_SCHEMAS = {"http": HttpActionConfig, "shell": ShellActionConfig}
+
+
+def _unprocessable(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail
+    )
+
 
 def _build_runtime_spec(action_type: str, action_config: dict) -> dict:
-    """把 user-facing action_config 翻成 worker 可直接 docker run 的 ContainerSpec dict。
+    """Translate a user-facing action into the ContainerSpec the worker executes.
 
-    Worker 端的 ExecutionService 吃 ContainerSpec(**spec_data)，所以這裡產生的 keys
-    必須跟 dataclass 對齊：image / command / env / timeout_seconds (+ optional cpu / memory_mb / working_dir)。
+    Keys must match the ContainerSpec dataclass: the worker does
+    `ContainerSpec(**job.runtime_spec)` and nothing else.
     """
     if action_type == "shell":
+        if not get_settings().shell_execution_enabled:
+            raise _unprocessable(
+                "Shell actions are disabled. Set DASS_SHELL_EXECUTION_ENABLED=true to allow them."
+            )
         return {
             "image": _SHELL_IMAGE,
             "command": ["sh", "-c", action_config["command"]],
@@ -36,38 +50,38 @@ def _build_runtime_spec(action_type: str, action_config: dict) -> dict:
         }
 
     if action_type == "http":
-        method = str(action_config.get("method", "GET")).upper()
-        url = action_config["url"]
-        headers = action_config.get("headers") or {}
+        command = ["curl", "-fsS", "-X", str(action_config.get("method", "GET")).upper()]
+        for key, value in (action_config.get("headers") or {}).items():
+            command.extend(["-H", f"{key}: {value}"])
         body = action_config.get("body")
-
-        cmd: list[str] = ["curl", "-fsS", "-X", method]
-        for k, v in headers.items():
-            cmd.extend(["-H", f"{k}: {v}"])
         if body is not None:
-            body_str = json.dumps(body) if isinstance(body, (dict, list)) else str(body)
-            cmd.extend(["-d", body_str])
-        cmd.append(url)
+            command.extend(
+                ["-d", json.dumps(body) if isinstance(body, (dict, list)) else str(body)]
+            )
+        command.append(action_config["url"])
 
         return {
             "image": _HTTP_IMAGE,
-            "command": cmd,
+            "command": command,
             "env": {},
             "timeout_seconds": int(action_config.get("timeout_seconds", 30)),
         }
 
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail=f"Unsupported action_type: {action_type}",
-    )
+    raise _unprocessable(f"Unsupported action_type: {action_type}")
 
 
-def _normalize_cron_expression(value: str | None) -> str | None:
-    if value is None:
-        return None
+def _resolve_schedule(raw_cron: str | None) -> tuple[str, str | None, datetime | None]:
+    """Turn a cron expression into (job_type, cron_expression, next_fire_at).
 
-    trimmed = value.strip()
-    return trimmed or None
+    No cron means a one-time job: the scheduler ignores it entirely and it only
+    runs when something calls /trigger (or when it is created/enabled).
+    """
+    cron = (raw_cron or "").strip() or None
+    if cron is None:
+        return "normal", None, None
+    if not croniter.is_valid(cron):
+        raise _unprocessable("Invalid cron expression")
+    return "scheduled", cron, next_cron_time(cron, utcnow())
 
 
 class JobService:
@@ -76,93 +90,89 @@ class JobService:
         self.jobs = JobRepository(db)
         self.tasks = TaskRepository(db)
 
+    # ── Commands ──────────────────────────────────────────────────────────────
+
     def create_job(self, payload: JobCreate) -> Job:
-        """根據 JobCreate schema 建立新 Job。
-
-        1. 驗證 cron_expression 是否合法（croniter.is_valid），不合法回 422
-        2. 用 payload 欄位建立 Job model instance
-           - next_fire_at 用 next_cron_time(cron_expression, utcnow()) 計算
-        3. 透過 self.jobs.create() 寫入 DB
-        4. 回傳建立好的 Job
-        """
-
-        # if payload.concurrency_policy == "replace":
-        #     # TODO: implement replace semantics explicitly; for now it is accepted but behaves like allow.
-        #     pass
-
-        # 有 cron → 定時任務（scheduler 會週期派發）；沒 cron → 即時/手動任務（normal），
-        # scheduler 不碰它（list_updated_since 只撈 job_type='scheduled'），只能靠 API /trigger
-        # 手動觸發進 normal queue。model 已允許 cron_expression / next_fire_at 為 NULL。
-        now = utcnow()
-        cron_expression = _normalize_cron_expression(payload.cron_expression)
-        if cron_expression:
-            if not croniter.is_valid(cron_expression):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Invalid cron expression",
-                )
-            job_type = "scheduled"
-            next_fire_at = next_cron_time(cron_expression, now)
-        else:
-            job_type = "normal"
-            next_fire_at = None
+        job_type, cron, next_fire_at = _resolve_schedule(payload.cron_expression)
 
         job = Job(
             name=payload.name,
             job_type=job_type,
-            cron_expression=cron_expression,
+            cron_expression=cron,
             action_type=payload.action_type,
             action_config=payload.action_config,
-            # S4: 同時填 runtime_spec 給 worker 直接吃
-            runtime_spec=_build_runtime_spec(
-                payload.action_type, payload.action_config
-            ),
+            runtime_spec=_build_runtime_spec(payload.action_type, payload.action_config),
             enabled=payload.enabled,
             concurrency_policy=payload.concurrency_policy,
             max_retries=payload.max_retries,
             next_fire_at=next_fire_at,
         )
-
-        # 處理 DAG 關聯
         if payload.upstream_job_ids:
-            upstreams = (
-                self.db.query(Job).filter(Job.id.in_(payload.upstream_job_ids)).all()
-            )
-            job.upstream_jobs.extend(upstreams)
-
+            job.upstream_jobs.extend(self._jobs_by_id(payload.upstream_job_ids))
         if payload.downstream_job_ids:
-            downstreams = (
-                self.db.query(Job).filter(Job.id.in_(payload.downstream_job_ids)).all()
-            )
-            job.downstream_jobs.extend(downstreams)
+            job.downstream_jobs.extend(self._jobs_by_id(payload.downstream_job_ids))
 
-        # 把剛建立的關聯 flush 進資料庫 (但尚未 commit) 以供 Recursive CTE 驗證
         self.db.add(job)
-        self.db.flush()
-        
-        # 進行迴圈偵測：如果這個新 Job 自己出現在自己的無窮後代中，代表產生了迴圈
-        descendants = self.jobs.get_all_descendants(str(job.id))
-        if str(job.id) in descendants:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Circular dependency detected",
-            )
+        self._assert_acyclic(job)
         job = self.jobs.create(job)
 
-        # 建立普通的單次任務 (normal job) 時，如果它沒有任何上游依賴，就直接發射它。
-        # 這是「建立即執行」的隨需觸發，scheduler 完全沒參與，所以 trigger_type 標 manual。
-        # 不可標 scheduled——否則會被當成排程器派發，污染 dashboard 的 Scheduler-dispatched /
-        # Scheduled dispatches(/min)指標（那兩個面板查的就是 trigger_type="scheduled"）。
-        if job.job_type == "normal" and job.enabled and not job.upstream_jobs:
-            task = Task(
-                job_id=str(job.id),
-                status="pending",
-                trigger_type="manual",
-                retry_count=0,
-            )
-            task = self.tasks.create(task)
-            get_normal_queue_client().send_task(str(task.id))
+        self._dispatch_if_one_time(job)
+        return job
 
+    def update_job(self, job_id: str, payload: JobUpdate) -> Job:
+        job = self.get_job(job_id)
+        data = payload.model_dump(exclude_unset=True)
+        was_enabled = job.enabled
+
+        for key, value in data.items():
+            if key not in ("cron_expression", "upstream_job_ids", "downstream_job_ids"):
+                setattr(job, key, value)
+
+        if "cron_expression" in data:
+            job.job_type, job.cron_expression, job.next_fire_at = _resolve_schedule(
+                data["cron_expression"]
+            )
+
+        # The runtime spec is derived state: re-derive it whenever either input moves.
+        if "action_type" in data or "action_config" in data:
+            action_type = data.get("action_type", job.action_type)
+            action_config = data.get("action_config", job.action_config)
+            schema = _ACTION_CONFIG_SCHEMAS.get(action_type)
+            if schema is not None:
+                schema.model_validate(action_config)
+            job.runtime_spec = _build_runtime_spec(action_type, action_config)
+
+        dependencies_changed = False
+        if payload.upstream_job_ids is not None:
+            job.upstream_jobs = self._jobs_by_id(payload.upstream_job_ids)
+            dependencies_changed = True
+        if payload.downstream_job_ids is not None:
+            job.downstream_jobs = self._jobs_by_id(payload.downstream_job_ids)
+            dependencies_changed = True
+        if dependencies_changed:
+            self._assert_acyclic(job)
+
+        job = self.jobs.update(job)
+
+        # Enabling a one-time job is what makes it run, mirroring create_job.
+        if not was_enabled and job.enabled:
+            self._dispatch_if_one_time(job)
+        return job
+
+    def delete_job(self, job_id: str) -> None:
+        self.jobs.delete(self.get_job(job_id))
+
+    def trigger_job(self, job_id: str, queue_client) -> Task:
+        """Queue one on-demand run of a job."""
+        job = self.get_job(job_id)
+        return self._enqueue_task(job, queue_client)
+
+    # ── Queries ───────────────────────────────────────────────────────────────
+
+    def get_job(self, job_id: str) -> Job:
+        job = self.jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
         return job
 
     def list_jobs(
@@ -175,7 +185,6 @@ class JobService:
         concurrency_policy: str | None = None,
         q: str | None = None,
     ) -> tuple[list[Job], int]:
-        """列出 Job，支援分頁與篩選（過濾/計數/分頁全下推到 SQL）。"""
         return self.jobs.list_paginated(
             page=page,
             page_size=page_size,
@@ -185,150 +194,41 @@ class JobService:
             q=q,
         )
 
-    def get_job(self, job_id: str) -> Job:
-        """取得單一 Job，不存在則 raise 404。
+    def list_job_tasks(self, job_id: str) -> list[Task]:
+        self.get_job(job_id)
+        return self.tasks.list_by_job(job_id)
 
-        呼叫 self.jobs.get(job_id)
-        若 None → raise HTTPException(status_code=404, detail="Job not found")
+    # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _jobs_by_id(self, job_ids) -> list[Job]:
+        return self.db.query(Job).filter(Job.id.in_(job_ids)).all()
+
+    def _assert_acyclic(self, job: Job) -> None:
+        """Reject a dependency edge that would make the job its own descendant."""
+        # Flush so the recursive CTE sees the new edges; still uncommitted.
+        self.db.flush()
+        if str(job.id) in self.jobs.get_all_descendants(str(job.id)):
+            raise _unprocessable("Circular dependency detected")
+
+    def _dispatch_if_one_time(self, job: Job) -> None:
+        """Run a one-time job right away, unless it is waiting on upstreams.
+
+        Scheduled jobs are the scheduler's business; a one-time job has no other
+        way to start.
         """
+        if job.job_type == "normal" and job.enabled and not job.upstream_jobs:
+            self._enqueue_task(job, get_normal_queue_client())
 
-        job = self.jobs.get(job_id)
-
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-
-        return job
-
-    def update_job(self, job_id: str, payload: JobUpdate) -> Job:
-        """更新 Job 欄位。需驗證 cron_expression 和 action_config 的合法性。
-
-        1. 先 get_job 確認存在
-        2. 用 payload.model_dump(exclude_unset=True) 取得要更新的欄位
-        3. 若有 cron_expression，驗證合法性
-        4. 若有 action_type/action_config，用對應 schema 驗證
-        5. setattr 更新 job 欄位
-        6. 若 cron 改了，重算 next_fire_at
-        7. self.jobs.update(job)
-        """
-
-        job = self.get_job(job_id)
-        data = payload.model_dump(exclude_unset=True)
-        was_enabled = job.enabled
-
-        cron_expression = data.get("cron_expression", job.cron_expression)
-        normalized_cron_expression = _normalize_cron_expression(cron_expression)
-
-        if "cron_expression" in data:
-            if normalized_cron_expression:
-                if not croniter.is_valid(normalized_cron_expression):
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail="Invalid cron expression",
-                    )
-                job.job_type = "scheduled"
-                job.next_fire_at = next_cron_time(normalized_cron_expression, utcnow())
-            else:
-                job.job_type = "normal"
-                job.next_fire_at = None
-
-        action_type = data.get("action_type", job.action_type)
-        action_config = data.get("action_config", job.action_config)
-
-        if action_type == "http":
-            HttpActionConfig.model_validate(action_config)
-        elif action_type == "shell":
-            ShellActionConfig.model_validate(action_config)
-        for key, value in data.items():
-            if key not in ("upstream_job_ids", "downstream_job_ids"):
-                setattr(job, key, value)
-        if "cron_expression" in data:
-            job.cron_expression = normalized_cron_expression
-
-        # S4: action_type / action_config 任何一個動過都要同步 runtime_spec。
-        if "action_type" in data or "action_config" in data:
-            job.runtime_spec = _build_runtime_spec(action_type, action_config)
-
-        if payload.upstream_job_ids is not None:
-            upstreams = (
-                self.db.query(Job).filter(Job.id.in_(payload.upstream_job_ids)).all()
-            )
-            job.upstream_jobs = upstreams
-
-        if payload.downstream_job_ids is not None:
-            downstreams = (
-                self.db.query(Job).filter(Job.id.in_(payload.downstream_job_ids)).all()
-            )
-            job.downstream_jobs = downstreams
-
-        # 只要有動到上下游關聯，就 flush 並進行迴圈驗證
-        if payload.upstream_job_ids is not None or payload.downstream_job_ids is not None:
-            self.db.flush()
-            descendants = self.jobs.get_all_descendants(str(job.id))
-            if str(job.id) in descendants:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Circular dependency detected",
-                )
-
-        job = self.jobs.update(job)
-
-        # 與 create_job() 保持一致：normal one-time job 一旦被啟用且沒有上游依賴，就立刻發射。
-        if not was_enabled and job.enabled and job.job_type == "normal" and not job.upstream_jobs:
-            task = Task(
+    def _enqueue_task(self, job: Job, queue_client) -> Task:
+        # trigger_type stays "manual" for every on-demand run. "scheduled" is
+        # reserved for the scheduler, and the dashboard's dispatch panels count it.
+        task = self.tasks.create(
+            Task(
                 job_id=str(job.id),
                 status="pending",
-                trigger_type="scheduled",
+                trigger_type="manual",
                 retry_count=0,
             )
-            task = self.tasks.create(task)
-            get_normal_queue_client().send_task(str(task.id))
-
-        return job
-
-    def delete_job(self, job_id: str) -> None:
-        """刪除指定 Job。
-
-        get_job → self.jobs.delete()
-        """
-
-        job = self.get_job(job_id)
-        self.jobs.delete(job)
-
-    def trigger_job(self, job_id: str, queue_client) -> Task:
-        """手動觸發 Job，建立一筆 pending Task 並送入 Queue。
-
-        1. get_job 確認存在
-        2. 建立 Task(job_id=..., status='pending', trigger_type='manual', retry_count=0)
-        3. self.tasks.create(task)
-        4. queue_client.send_task(str(task.id))
-        5. 回傳 task
-        """
-
-        job = self.get_job(job_id)
-
-        task = Task(
-            job_id=job.id,
-            status="pending",
-            trigger_type="manual",
-            retry_count=0,
         )
-
-        task = self.tasks.create(task)
         queue_client.send_task(str(task.id))
-
         return task
-
-    def list_job_tasks(self, job_id: str) -> list[Task]:
-        """列出指定 Job 的所有 Task 歷史。
-
-        先 get_job 確認存在，再 self.tasks.list_by_job(job_id)
-        """
-
-        try:
-            job = self.get_job(job_id)
-
-            assert str(job.id) == str(job_id)
-        except (HTTPException, AssertionError):
-            raise HTTPException(status_code=404, detail="Job not found")
-
-        return self.tasks.list_by_job(job_id)
