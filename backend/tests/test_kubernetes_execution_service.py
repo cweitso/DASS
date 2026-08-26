@@ -130,8 +130,18 @@ class TestJobManifest:
         assert container.resources.requests["memory"] == "512Mi"
         assert container.resources.limits["memory"] == "512Mi"
 
-    def test_no_resources_leaves_none(self):
+    def test_unspecified_resources_fall_back_to_spec_defaults(self):
+        # ContainerSpec carries default cpu/memory so a job pod is always
+        # schedulable with known bounds instead of being unconstrained.
         manifest = _capture_manifest(ContainerSpec(image="img", timeout_seconds=10))
+        container = manifest.spec.template.spec.containers[0]
+        assert container.resources.requests == {"cpu": "500m", "memory": "256Mi"}
+        assert container.resources.limits == {"cpu": "500m", "memory": "256Mi"}
+
+    def test_explicitly_unbounded_resources_leave_none(self):
+        manifest = _capture_manifest(
+            ContainerSpec(image="img", timeout_seconds=10, cpu=None, memory_mb=None)
+        )
         container = manifest.spec.template.spec.containers[0]
         assert container.resources.requests is None
         assert container.resources.limits is None
