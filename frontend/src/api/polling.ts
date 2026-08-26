@@ -3,10 +3,18 @@ import type { Task, TaskStatus } from "../types"
 /** How often to re-check something that is still moving. */
 export const LIVE_REFETCH_INTERVAL_MS = 3000
 
-const TERMINAL_STATUSES: TaskStatus[] = ["success", "final_failed"]
+/**
+ * The only statuses a task can still move out of.
+ *
+ * Defined as the moving set rather than the terminal one because "failed" is
+ * easy to misread: it records a single attempt that has already finished, and a
+ * retry is a **new** task row with retry_count + 1. Treating it as non-terminal
+ * makes a page poll forever as soon as any run has been retried.
+ */
+const ACTIVE_STATUSES: TaskStatus[] = ["pending", "running"]
 
 export function isTaskSettled(task: Task | undefined): boolean {
-  return task !== undefined && TERMINAL_STATUSES.includes(task.status)
+  return task !== undefined && !ACTIVE_STATUSES.includes(task.status)
 }
 
 /**
