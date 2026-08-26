@@ -15,6 +15,9 @@ docker compose "${COMPOSE[@]}" up -d \
 
 wait_for_api
 
+# If mode 2 was running, hand the queues back to the Compose worker.
+scale_down_k8s_workers
+
 echo ""
 echo "=== [2/3] Starting Prometheus and Grafana ==="
 start_observability

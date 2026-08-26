@@ -87,6 +87,9 @@ ensure_env_file
 docker compose "${COMPOSE[@]}" up -d \
   traefik-pki traefik postgres postgres-replica pgbouncer localstack \
   api-server scheduler frontend
+
+# Mode 1 may have left its own worker fleet running against the same queues.
+stop_compose_workers
 wait_for_api
 
 echo ""

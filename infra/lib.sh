@@ -99,6 +99,21 @@ stop_ksm_port_forward() {
   rm -f "$KSM_SCRIPT"
 }
 
+# The two modes run different worker fleets against the same queues. Switching
+# without standing the previous one down leaves both consuming, which double-runs
+# nothing but does make queue depth and scaling behaviour impossible to read.
+stop_compose_workers() {
+  docker compose "${COMPOSE[@]}" stop worker autoscaler 2>/dev/null || true
+}
+
+scale_down_k8s_workers() {
+  command -v kubectl >/dev/null 2>&1 || return 0
+  kubectl get namespace dass >/dev/null 2>&1 || return 0
+  echo "Scaling Kubernetes workers to 0 (mode 2 was running)..."
+  kubectl scale deployment dass-worker-normal dass-worker-scheduled dass-worker-retry \
+    --replicas=0 -n dass >/dev/null 2>&1 || true
+}
+
 stop_minikube() {
   if command -v minikube >/dev/null 2>&1 && minikube status &>/dev/null; then
     minikube stop
