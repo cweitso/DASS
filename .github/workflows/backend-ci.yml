@@ -1,19 +1,16 @@
-# ============================================================
-# backend-ci.yml — unit tests
-# ============================================================
-# Triggers: dorny/paths-filter on changed paths.
-# If a backend module is changed, the corresponding unit-test job runs.
-# Environment: SQLite + MemoryQueueClient, no Docker required.
-# Runs in parallel with integration-ci.yml.
-# ============================================================
-
+# Backend unit tests. SQLite + the in-memory queue, so no service containers are
+# needed. Integration tests live in integration-ci.yml and run in parallel.
+#
+# One job runs the whole suite rather than one job per module. The suite takes a
+# few seconds, a single `uv sync` is cheaper than seven, and a per-module split
+# had already left three test files with no job at all.
 name: Backend CI
 
 on:
   pull_request:
     paths:
-      - 'backend/**'
-      - '.github/workflows/backend-ci.yml'
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
   workflow_dispatch:
 
 concurrency:
@@ -25,136 +22,13 @@ defaults:
     working-directory: backend
 
 jobs:
-  changes:
-    name: Detect changed paths
+  test:
+    name: Unit tests
     runs-on: ubuntu-latest
-    outputs:
-      repositories:       ${{ steps.filter.outputs.repositories }}
-      queue:              ${{ steps.filter.outputs.queue }}
-      api:                ${{ steps.filter.outputs.api }}
-      execution_service:  ${{ steps.filter.outputs.execution_service }}
-      scheduler:          ${{ steps.filter.outputs.scheduler }}
-      worker:             ${{ steps.filter.outputs.worker }}
-      autoscaler:         ${{ steps.filter.outputs.autoscaler }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            repositories:
-              - 'backend/app/repositories/**'
-              - 'backend/app/models/**'
-              - 'backend/app/db/**'
-              - 'backend/alembic/**'
-            queue:
-              - 'backend/app/queue/**'
-            api:
-              - 'backend/app/api/**'
-              - 'backend/app/services/job_service.py'
-              - 'backend/app/schemas/**'
-            execution_service:
-              - 'backend/app/services/execution_service.py'
-              - 'backend/app/services/worker_service.py'
-              - 'backend/app/utils/cron.py'
-            scheduler:
-              - 'backend/app/services/scheduler_service.py'
-              - 'backend/app/scheduler/**'
-              - 'backend/app/utils/time.py'
-            worker:
-              - 'backend/app/services/worker_service.py'
-              - 'backend/app/worker/**'
-            autoscaler:
-              - 'backend/app/services/autoscaler_service.py'
-              - 'backend/app/services/vm_service.py'
-
-  test-repositories:
-    name: Test / Repositories (DB Layer)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.repositories == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
       - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_repositories.py -v
-
-  test-queue:
-    name: Test / Queue (Memory & Multi-Queue)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.queue == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_queue.py -v
-
-  test-api:
-    name: Test / API (Jobs CRUD & Pagination)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.api == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_api.py -v
-
-  test-execution-service:
-    name: Test / ExecutionService & Cron (Container Execution)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.execution_service == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_execution_service.py tests/test_cron.py -v
-
-  test-scheduler:
-    name: Test / Scheduler (Dispatch & Orphan Recovery)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.scheduler == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_scheduler.py -v
-
-  test-worker:
-    name: Test / Worker (Task Processing & Retry)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.worker == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_worker.py -v
-
-  test-autoscaler:
-    name: Test / Autoscaler (Queue-Depth Scaling)
-    needs: changes
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.autoscaler == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --frozen
-      - run: uv run pytest tests/test_autoscaler.py -v
+      - run: uv run pytest
