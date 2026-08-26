@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+import heapq
 import logging
-
-from sqlalchemy.orm import Session
+from datetime import UTC, datetime
 
 from app.models.task import Task
 from app.repositories.job_repository import JobRepository
@@ -13,153 +12,136 @@ from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-import heapq
+# Heap entries and cached next_fire_at are compared as float timestamps, so allow a
+# little slack when deciding whether they still describe the same firing.
+_TIMESTAMP_EPSILON = 0.001
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes; treat them as UTC."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 class CronScheduler:
+    """Dispatches cron jobs from an in-memory heap of next firing times.
+
+    The heap is a cache over the jobs table, refreshed incrementally by sync_jobs.
+    Stale heap entries are not removed — they are recognised and skipped on pop
+    (tombstoning), which keeps sync cheap.
+    """
+
     def __init__(
         self, session_maker, queue_client, worker_visibility_timeout_seconds: int = 300
     ):
         self.session_maker = session_maker
-        self.job = None
-        self.task = None
-        self._heap = []
-        self._job_cache = {}
-        self.last_sync_at = None
         self.queue = queue_client
         self.worker_visibility_timeout_seconds = worker_visibility_timeout_seconds
+        self._heap: list[tuple[float, str]] = []
+        self._job_cache: dict[str, object] = {}
+        self.last_sync_at: datetime | None = None
 
-    def sync_jobs(self):
-        """同步資料庫中異動的 Job 到排程堆疊中 (Tombstone 模式)。"""
-
+    def sync_jobs(self) -> None:
+        """Pull jobs changed since the last sync into the cache and heap."""
         with self.session_maker() as db:
-            jobs_repo = JobRepository(db)
-            jobs = jobs_repo.list_updated_since(self.last_sync_at)
+            jobs = JobRepository(db).list_updated_since(self.last_sync_at)
             db.expunge_all()
+
         for job in jobs:
-            if job.enabled:
-                if job.next_fire_at and job.next_fire_at.tzinfo is None:
-                    job.next_fire_at = job.next_fire_at.replace(tzinfo=UTC)
+            job_id = str(job.id)
 
-                cached_job = self._job_cache.get(str(job.id))
-                # 若 cache 中沒有這個 job，或新的下次執行時間跟 cache 裡的不同，才 push 進 Heap
-                if job.next_fire_at is not None:
-                    if (
-                        not cached_job
-                        or cached_job.next_fire_at is None
-                        or abs(
-                            cached_job.next_fire_at.timestamp()
-                            - job.next_fire_at.timestamp()
-                        )
-                        > 0.001
-                    ):
-                        heapq.heappush(
-                            self._heap, (job.next_fire_at.timestamp(), str(job.id))
-                        )
+            if not job.enabled:
+                # Leaving the heap entry behind is fine: the pop path drops entries
+                # whose job is no longer cached.
+                self._job_cache.pop(job_id, None)
+                continue
 
-                self._job_cache[str(job.id)] = job
-            else:
-                self._job_cache.pop(str(job.id), None)
+            job.next_fire_at = _as_utc(job.next_fire_at)
+            if job.next_fire_at is not None and self._is_new_firing(job_id, job.next_fire_at):
+                heapq.heappush(self._heap, (job.next_fire_at.timestamp(), job_id))
+            self._job_cache[job_id] = job
 
         self.last_sync_at = utcnow()
 
-    def recover_orphans(self) -> int:
-        """回收所有 locked_until 過期的 running Task：把 status 改回 pending。
-
-        不需要重送 message：worker 端 heartbeat 同步延長 SQS visibility 與 DB locked_until，
-        兩者會一起過期。SQS visibility 過期後 message 自動 visible，會被下個 worker 撈到。
-        此處只負責讓 atomic claim（WHERE status='pending'）能再次成功。
-
-        若 heartbeat 異常導致 DB lock 過期但 SQS visibility 仍活，避免雙路徑造成
-        duplicate execution——所以這裡不主動 resend。
-        """
-        now = utcnow()
-        with self.session_maker() as db:
-            task_repo = TaskRepository(db)
-            tasks = task_repo.list_expired_running(now)
-            for task in tasks:
-                task_repo.mark_running_expired_pending(task)
-                # 這裡依循 main 的邏輯，拿掉 self.queue.send_task()
-
-        return len(tasks)
-
-    def dispatch_due_jobs(self) -> int:
-        now = utcnow()
-        counter = 0
-        start_time = now.timestamp()
-
-        logger.info(
-            f"[Scheduler] dispatch_due_jobs started. Heap size: {len(self._heap)}"
+    def _is_new_firing(self, job_id: str, next_fire_at: datetime) -> bool:
+        cached = self._job_cache.get(job_id)
+        if cached is None or cached.next_fire_at is None:
+            return True
+        return (
+            abs(cached.next_fire_at.timestamp() - next_fire_at.timestamp())
+            > _TIMESTAMP_EPSILON
         )
 
+    def recover_orphans(self) -> int:
+        """Return tasks whose lock expired to pending so they can be claimed again.
+
+        No message is re-sent. The worker heartbeat extends the DB lock and the queue
+        visibility together, so they expire together and the queue re-delivers on its
+        own. Re-sending here would risk running the task twice.
+        """
+        with self.session_maker() as db:
+            repo = TaskRepository(db)
+            tasks = repo.list_expired_running(utcnow())
+            for task in tasks:
+                repo.mark_running_expired_pending(task)
+            return len(tasks)
+
+    def dispatch_due_jobs(self) -> int:
+        """Fire every job whose next_fire_at has passed, then reschedule it."""
+        now = utcnow()
+        dispatched = 0
+
         while self._heap:
-            next_time, job_id = self._heap[0]
-            if next_time > now.timestamp():
-                logger.info(
-                    f"[Scheduler] Break! next_time={next_time} > now={now.timestamp()} Diff={next_time - now.timestamp()}"
-                )
+            scheduled_ts, job_id = self._heap[0]
+            if scheduled_ts > now.timestamp():
                 break
-            next_time, job_id = heapq.heappop(self._heap)
+            heapq.heappop(self._heap)
 
             job = self._job_cache.get(job_id)
             if job is None:
-                logger.info(
-                    f"[Scheduler] Job {job_id} not found in cache (might be deleted/disabled)."
-                )
+                logger.debug("Skipping job %s: deleted or disabled", job_id)
                 continue
-
-            # 處理 Float 精度誤差，容忍 0.001 秒差異
-            if abs(job.next_fire_at.timestamp() - next_time) > 0.001:
-                logger.info(
-                    f"[Scheduler] Job {job_id} next_fire_at mismatch. Cache: {job.next_fire_at.timestamp()}, Heap: {next_time}. Skipping old heap node."
-                )
+            if abs(job.next_fire_at.timestamp() - scheduled_ts) > _TIMESTAMP_EPSILON:
+                logger.debug("Skipping stale heap entry for job %s", job_id)
                 continue
 
             with self.session_maker() as db:
-                self.job = JobRepository(db)
-                self.task = TaskRepository(db)
                 job = db.merge(job)
+                fired = self._dispatch(db, job, now)
 
-                # 執行發射
-                success = self._dispatch_job(job, now)
-
-                if job.next_fire_at and job.next_fire_at.tzinfo is None:
-                    job.next_fire_at = job.next_fire_at.replace(tzinfo=UTC)
-
-                # 【不管成功或失敗】，它的 next_fire_at 都已經算好了，必須存回快取並 Push 回 Heap 排隊
-                self._job_cache[str(job_id)] = job
+                # Reschedule whether or not the run happened: _dispatch has already
+                # advanced next_fire_at, and a skipped run must not stall the job.
+                job.next_fire_at = _as_utc(job.next_fire_at)
+                self._job_cache[job_id] = job
                 if job.next_fire_at is not None:
-                    heapq.heappush(
-                        self._heap, (job.next_fire_at.timestamp(), str(job_id))
-                    )
+                    heapq.heappush(self._heap, (job.next_fire_at.timestamp(), job_id))
 
-                # 只有真正發射成功才算 counter
-                if success:
-                    counter += 1
+            dispatched += fired
 
-        elapsed = utcnow().timestamp() - start_time
-        if counter > 0:
-            logger.info(
-                f"[Scheduler] Dispatched {counter} jobs in {elapsed:.3f} seconds. Throughput: {counter / elapsed:.2f} jobs/s"
-            )
+        if dispatched:
+            logger.info("Dispatched %d job(s)", dispatched)
+        return dispatched
 
-        return counter
+    def _dispatch(self, db, job, now: datetime) -> int:
+        """Advance the job's schedule and enqueue a task unless concurrency forbids it."""
+        jobs = JobRepository(db)
+        tasks = TaskRepository(db)
 
-    def _dispatch_job(self, job, now: datetime) -> bool:
-        """派發單一 Job：建立 Task、送入 Queue、更新 next_fire_at"""
         job.next_fire_at = next_cron_time(job.cron_expression, now)
-        self.job.update(job)
-        if (
-            job.concurrency_policy == "forbid"
-            and self.task.count_running_for_job(job.id) > 0
-        ):
-            return False
-        task = Task(
-            job_id=str(job.id),
-            status="pending",
-            trigger_type="scheduled",
-            retry_count=0,
+        jobs.update(job)
+
+        if job.concurrency_policy == "forbid" and tasks.count_running_for_job(job.id):
+            logger.info("Skipping job '%s': previous run still in flight", job.name)
+            return 0
+
+        task = tasks.create(
+            Task(
+                job_id=str(job.id),
+                status="pending",
+                trigger_type="scheduled",
+                retry_count=0,
+            )
         )
-        self.task.create(task)
         self.queue.send_task(str(task.id))
-        return True
+        return 1

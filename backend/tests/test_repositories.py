@@ -93,7 +93,7 @@ class TestJobRepository:
     def test_list_jobs(self, job_repo):
         job_repo.create(_make_job(name="job-1"))
         job_repo.create(_make_job(name="job-2", enabled=False, max_retries=1))
-        jobs = job_repo.list()
+        jobs, _ = job_repo.list_paginated(page=1, page_size=20)
         assert len(jobs) == 2
         assert {j.name for j in jobs} == {"job-1", "job-2"}
 

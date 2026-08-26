@@ -15,45 +15,39 @@ settings = get_settings()
 configure_logging(settings.log_level)
 
 app = FastAPI(title="dass API", version="0.1.0")
-DEFAULT_TLS_ORIGINS = {
-    "https://dass.localhost:8443",
-    "https://localhost:8443",
-    "https://127.0.0.1:8443",
-}
-DEFAULT_HTTP_ORIGINS = {
+
+# Always allowed on top of DASS_CORS_ORIGINS: the browser reaches the API either
+# straight on :3000/:8000 or through Traefik's TLS entrypoint on :8443.
+_BUILTIN_ORIGINS = (
     "http://dass.localhost",
     "http://localhost",
     "http://127.0.0.1",
     "http://dass.localhost:3000",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-}
+    "https://dass.localhost:8443",
+    "https://localhost:8443",
+    "https://127.0.0.1:8443",
+)
 
 
-def _normalize_cors_origins(raw: str) -> list[str]:
-    if raw == "*":
+def _cors_origins(configured: str) -> list[str]:
+    if configured == "*":
         return ["*"]
 
     origins: list[str] = []
-    seen: set[str] = set()
-    for origin in [origin.strip() for origin in raw.split(",")]:
-        if not origin or origin in seen:
-            continue
-        origins.append(origin)
-        seen.add(origin)
-
-    for origin in [*DEFAULT_HTTP_ORIGINS, *DEFAULT_TLS_ORIGINS]:
-        if origin not in seen:
+    for origin in (*configured.split(","), *_BUILTIN_ORIGINS):
+        origin = origin.strip()
+        if origin and origin not in origins:
             origins.append(origin)
-            seen.add(origin)
-
     return origins
 
 
-origins = _normalize_cors_origins(settings.cors_origins)
+origins = _cors_origins(settings.cors_origins)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    # Credentials cannot be combined with a wildcard origin.
     allow_credentials=origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,24 +60,17 @@ app.include_router(vms_router)
 
 @app.get("/health")
 def health():
-    """Health check endpoint：確認 DB 連線正常。
-    #   1. 用 SessionLocal() 開 session
-    #   2. 執行 SELECT 1 確認 DB 連線
-    #   3. 回傳 {"status": "ok", "service": "dass"}
-    """
+    """Liveness plus a round trip to the database."""
     with SessionLocal() as db:
         db.execute(text("SELECT 1"))
     return {"status": "ok", "service": "dass"}
 
+
 @app.get("/metrics")
 def metrics():
-    """回傳 Job 和 Task 的統計數字。
-    #   1. 用 SessionLocal() 開 session
-    #   2. SELECT count(*) FROM jobs
-    #   3. SELECT count(*) FROM tasks
-    #   4. 回傳 {"jobs": int, "tasks": int}
-    """
+    """Job and task counts. Not Prometheus format — the exporters cover that."""
     with SessionLocal() as db:
-        num_jobs = db.execute(text("SELECT count(*) FROM jobs")).scalar()
-        num_tasks = db.execute(text("SELECT count(*) FROM tasks")).scalar()
-    return {"jobs": num_jobs, "tasks": num_tasks}
+        return {
+            "jobs": db.execute(text("SELECT count(*) FROM jobs")).scalar(),
+            "tasks": db.execute(text("SELECT count(*) FROM tasks")).scalar(),
+        }

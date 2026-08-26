@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from sqlalchemy import Select, create_engine
@@ -180,3 +182,22 @@ SessionLocal = sessionmaker(
     autocommit=False,
     expire_on_commit=False,
 )
+
+
+@contextmanager
+def force_primary(db: Session) -> Iterator[None]:
+    """Pin this session's reads to the primary for the duration of the block.
+
+    Scoped rather than sticky: setting the flag and leaving it set would send every
+    later read on a reused session to the primary, quietly disabling the split.
+    """
+    previous = db.info.get("force_primary")
+    had_previous = "force_primary" in db.info
+    db.info["force_primary"] = True
+    try:
+        yield
+    finally:
+        if had_previous:
+            db.info["force_primary"] = previous
+        else:
+            db.info.pop("force_primary", None)
