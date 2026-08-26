@@ -18,6 +18,13 @@ from app.services.kubernetes_execution_service import KubernetesExecutionService
 # Test helpers
 # ---------------------------------------------------------------------------
 
+def _raw_response(body):
+    """Mimic the client's _preload_content=False return: an object with .data."""
+    response = MagicMock()
+    response.data = body if isinstance(body, bytes) else body.encode()
+    return response
+
+
 def _job_status(succeeded: int = 0, failed: int = 0) -> MagicMock:
     s = MagicMock()
     s.status.succeeded = succeeded
@@ -45,7 +52,7 @@ def _make_svc(
     mock_core = MagicMock()
     mock_batch.read_namespaced_job_status.side_effect = batch_responses
     mock_core.list_namespaced_pod.return_value = _pod_list(*pod_names)
-    mock_core.read_namespaced_pod_log.return_value = log_output
+    mock_core.read_namespaced_pod_log.return_value = _raw_response(log_output)
     svc = KubernetesExecutionService(
         namespace="test-ns",
         poll_interval=0,
@@ -116,6 +123,23 @@ class TestExecutionPaths:
 # ---------------------------------------------------------------------------
 # Job manifest construction
 # ---------------------------------------------------------------------------
+
+def test_pod_logs_are_decoded_when_the_client_returns_bytes():
+    # A bytes payload used to be stringified into "b'...'" and stored that way.
+    service = KubernetesExecutionService(namespace="dass")
+    service._batch_v1 = MagicMock()
+    core = MagicMock()
+    pod = MagicMock()
+    pod.metadata.name = "dass-job-abc-xyz"
+    core.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    core.read_namespaced_pod_log.return_value = _raw_response(b"hello-from-e2e\n")
+    service._core_v1 = core
+
+    stdout, stderr = service._get_pod_logs("dass-job-abc")
+
+    assert stdout == "hello-from-e2e\n"
+    assert stderr == ""
+
 
 class TestJobManifest:
     def test_cpu_converted_to_millicores(self):
@@ -189,7 +213,7 @@ class TestJobManifest:
             mock_core = MagicMock()
             mock_batch.read_namespaced_job_status.return_value = _job_status(succeeded=1)
             mock_core.list_namespaced_pod.return_value = _pod_list("pod-1")
-            mock_core.read_namespaced_pod_log.return_value = ""
+            mock_core.read_namespaced_pod_log.return_value = _raw_response("")
             svc = KubernetesExecutionService(namespace="ns", poll_interval=0, batch_v1=mock_batch, core_v1=mock_core)
             svc.run(ContainerSpec(image="img", timeout_seconds=10))
             names.add(mock_batch.create_namespaced_job.call_args.args[1].metadata.name)
