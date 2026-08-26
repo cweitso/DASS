@@ -43,7 +43,7 @@ DEFAULT_CA_CERT = REPO_ROOT / "infra" / "traefik" / "pki" / "rootCA.crt"
 def _payload(name: str) -> dict[str, Any]:
     return {
         "name": name,
-        # With a cron, so job_type='scheduled'. Due every 2 minutes, dispatched by
+        # With a cron, so job_type='scheduled'. Due every 5 minutes, dispatched by
         # the scheduler into the scheduled queue.
         "cron_expression": "*/5 * * * *",
         "action_type": "shell",
