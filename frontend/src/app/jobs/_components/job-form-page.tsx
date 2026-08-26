@@ -1,17 +1,23 @@
 "use client"
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useEffect, useMemo, useState } from "react"
 import type { FormEvent } from "react"
 
 import { api } from "../../../api/client"
+import { useDebouncedValue } from "../../../hooks/use-debounced-value"
 import { useToast } from "../../../hooks/use-toast"
 import type { ActionType, ConcurrencyPolicy, Job } from "../../../types"
 import { normalizeCronExpression } from "../_lib/job-form.utils"
 import {
-  JOB_DEPENDENCY_COMBOBOX_MAX_CANDIDATES,
+  JOB_DEPENDENCY_COMBOBOX_PAGE_SIZE,
   JobDependencyCombobox,
 } from "./job-dependency-combobox"
 
@@ -219,16 +225,37 @@ export default function JobFormPage() {
     enabled: isEditing,
   })
 
+  // Candidate search runs on the server. Filtering a single fetched page in the
+  // browser silently hid every job past the first page from the picker.
+  const [dependencyQuery, setDependencyQuery] = useState("")
+  const debouncedDependencyQuery = useDebouncedValue(dependencyQuery, 250)
+
   const jobsQuery = useQuery({
-    queryKey: ["jobs", "dependency-picker"],
+    queryKey: ["jobs", "dependency-picker", debouncedDependencyQuery],
     queryFn: () =>
       api.listJobs({
         page: 1,
-        page_size: JOB_DEPENDENCY_COMBOBOX_MAX_CANDIDATES,
+        page_size: JOB_DEPENDENCY_COMBOBOX_PAGE_SIZE,
+        q: debouncedDependencyQuery || undefined,
       }),
+    placeholderData: previous => previous,
   })
 
   const [form, setForm] = useState<JobFormState>(() => createDefaultFormState())
+
+  // Selected upstreams are resolved by id so a dependency that falls outside the
+  // current search results still renders as a named chip instead of vanishing.
+  const selectedUpstreamJobs = useQueries({
+    queries: form.upstream_job_ids.map(id => ({
+      queryKey: ["job", id],
+      queryFn: () => api.getJob(id),
+      staleTime: 5 * 60 * 1000,
+    })),
+    combine: results =>
+      results
+        .map(result => result.data)
+        .filter((job): job is Job => Boolean(job)),
+  })
   const [errors, setErrors] = useState<JobFormErrors>({})
   const [submitError, setSubmitError] = useState("")
 
@@ -516,8 +543,10 @@ export default function JobFormPage() {
           currentJobId={jobId || undefined}
           description="Pick upstream jobs by name. Their IDs are shown so you can confirm the dependency target before saving."
           error={errors.upstream_job_ids}
+          hasMore={
+            (jobsQuery.data?.total ?? 0) > JOB_DEPENDENCY_COMBOBOX_PAGE_SIZE
+          }
           isLoading={jobsQuery.isLoading}
-          maxCandidates={JOB_DEPENDENCY_COMBOBOX_MAX_CANDIDATES}
           label="Upstream dependencies"
           onChange={upstream_job_ids =>
             setForm(current => ({
@@ -525,8 +554,11 @@ export default function JobFormPage() {
               upstream_job_ids,
             }))
           }
+          onQueryChange={setDependencyQuery}
           options={jobsQuery.data?.items ?? []}
+          query={dependencyQuery}
           selectedIds={form.upstream_job_ids}
+          selectedJobs={selectedUpstreamJobs}
         />
 
         {form.action_type === "http" ? (
