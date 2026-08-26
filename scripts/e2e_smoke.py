@@ -148,6 +148,27 @@ def http_json(
         return e.code, parsed
 
 
+def k8s_worker_pods() -> list[str]:
+    """Names of running worker pods in the dass namespace, empty if not mode 2."""
+    try:
+        out = subprocess.run(
+            [
+                "kubectl", "get", "pods", "-n", "dass",
+                "--field-selector=status.phase=Running",
+                "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if out.returncode != 0:
+        return []
+    return [name for name in out.stdout.split() if "worker" in name]
+
+
 def docker_compose_ps() -> dict[str, str]:
     """Return {service_name: state} for the current dass compose project."""
     try:
@@ -182,7 +203,17 @@ def check_components(api_base: str, report: Report, ssl_context: ssl.SSLContext 
     header("Phase 1 ── Component Health")
 
     services = docker_compose_ps()
-    expected = ["traefik", "postgres", "postgres-replica", "localstack", "api-server", "scheduler", "worker", "frontend"]
+    # The worker is deliberately absent from Compose in mode 2, where Kubernetes
+    # runs one Deployment per queue instead. Check it separately.
+    expected = [
+        "traefik",
+        "postgres",
+        "postgres-replica",
+        "localstack",
+        "api-server",
+        "scheduler",
+        "frontend",
+    ]
     if not services:
         report.add_component(CheckResult("docker compose ps", "warn", "no compose project detected in CWD"))
     else:
@@ -194,6 +225,28 @@ def check_components(api_base: str, report: Report, ssl_context: ssl.SSLContext 
                 report.add_component(CheckResult(f"container: {svc}", "ok", state))
             else:
                 report.add_component(CheckResult(f"container: {svc}", "fail", state))
+
+    # Workers: Compose (mode 1) or Kubernetes (mode 2). One of the two must be up.
+    compose_worker = services.get("worker", "").lower()
+    pods = k8s_worker_pods()
+    if compose_worker == "running":
+        report.add_component(CheckResult("worker fleet (mode 1: compose)", "ok", "running"))
+        if pods:
+            report.add_component(
+                CheckResult(
+                    "worker fleet: both modes active",
+                    "warn",
+                    f"{len(pods)} K8s worker pods are also running",
+                )
+            )
+    elif pods:
+        report.add_component(
+            CheckResult("worker fleet (mode 2: kubernetes)", "ok", f"{len(pods)} pods running")
+        )
+    else:
+        report.add_component(
+            CheckResult("worker fleet", "fail", "no compose worker and no K8s worker pods")
+        )
 
     # API /health (also exercises DB connection)
     try:
