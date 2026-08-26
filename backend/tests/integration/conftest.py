@@ -108,8 +108,9 @@ def make_job(main_db):
                     "headers": {},
                 },
             ),
-            # S4: WorkerService._execute_job 需要 runtime_spec 才能 build ContainerSpec；
-            # 不給的話 ContainerSpec(**{}) 會在 image 缺失時噴 TypeError，executor 永遠跑不到
+            # The worker builds ContainerSpec(**runtime_spec). Without one,
+            # ContainerSpec(**{}) raises on the missing image and the executor
+            # is never reached.
             runtime_spec=overrides.get(
                 "runtime_spec",
                 {"image": "alpine:3", "command": ["true"], "env": {}, "timeout_seconds": 1},

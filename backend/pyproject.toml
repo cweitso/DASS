@@ -42,12 +42,12 @@ include = ["app*"]
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
-  "integration: 整合測試 — 需要 Docker services (PostgreSQL + LocalStack)",
+  "integration: needs live Docker services (PostgreSQL + LocalStack)",
 ]
-# 預設跑 unit test 時忽略 integration 目錄，避免本地缺 Docker 爆掉
-# -v：列出每個 test 名稱與結果
-# --durations=10：顯示最慢的 10 個 test，方便抓瓶頸
-# -ra：在結尾彙整 failures/errors/skips 的原因
+# tests/integration is ignored by default so a plain `pytest` needs no Docker.
+#   -v            name and result for every test
+#   --durations=10 the ten slowest tests, for spotting drift
+#   -ra           a summary of failures, errors and skips at the end
 addopts = "--ignore=tests/integration -v --durations=10 -ra"
 asyncio_mode = "auto"
 

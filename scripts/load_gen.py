@@ -57,7 +57,7 @@ async def trigger_one(client: httpx.AsyncClient, base: str, job_id: str) -> bool
         resp = await client.post(f"{base}/api/v1/jobs/{job_id}/trigger")
         return resp.status_code == 200
     except Exception as e:
-        print(f"\n  [trigger error] {type(e).__name__}: {e}", flush=True)  # 加這行
+        print(f"\n  [trigger error] {type(e).__name__}: {e}", flush=True)
         return False
 
 
