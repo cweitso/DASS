@@ -1,87 +1,123 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import selectinload
 
+from app.models.job import Job
 from app.models.task import Task
-from app.repositories.job_repository import JobRepository
 from app.repositories.task_repository import TaskRepository
 
 logger = logging.getLogger(__name__)
 
 
+def _completed_at(task: Task) -> datetime:
+    return task.finished_at or task.created_at
+
+
 class DependencyScheduler:
+    """Fires downstream jobs once all of their upstreams have succeeded."""
+
     def __init__(self, session_maker, queue_client):
         self.session_maker = session_maker
         self.queue = queue_client
 
     def trigger_dependent_jobs(self) -> int:
-        """輪詢找出剛成功的任務，並觸發它們的下游"""
-        counter = 0
         with self.session_maker() as db:
-            task_repo = TaskRepository(db)
-            job_repo = JobRepository(db)
+            tasks = TaskRepository(db).get_unprocessed_successful_tasks()
+            if not tasks:
+                return 0
 
-            # 1. 撈出剛成功但還沒處理相依性的 Tasks
-            tasks = task_repo.get_unprocessed_successful_tasks()
+            source_jobs = self._load_jobs_with_dependencies(
+                db, {str(task.job_id) for task in tasks}
+            )
+
+            # Every downstream reachable from the tasks we just observed. Doing this
+            # as a set means a diamond (A→C, B→C) evaluates C once per cycle instead
+            # of once per completed upstream.
+            candidates: dict[str, Job] = {}
+            for job in source_jobs.values():
+                for downstream in job.downstream_jobs:
+                    if downstream.enabled:
+                        candidates[str(downstream.id)] = downstream
 
             for task in tasks:
-                # 2. 標記為已處理，避免下次輪詢重複撈到
-                task_repo.mark_processed_for_chaining(task)
+                TaskRepository(db).mark_processed_for_chaining(task)
 
-                # 3. 取得這個 Task 所屬的 Job
-                job = job_repo.get(task.job_id)
-                if not job or not job.downstream_jobs:
-                    continue  # 如果這個 Job 已經被刪除，或者它根本沒有下游，就跳過
+            if not candidates:
+                return 0
 
-                logger.info(
-                    f"[Scheduler] Task {task.id} (Job {job.name}) finished. Checking its {len(job.downstream_jobs)} downstream jobs..."
+            latest = TaskRepository(db).latest_task_per_job(
+                list(
+                    {
+                        *candidates,
+                        *(
+                            str(upstream.id)
+                            for job in candidates.values()
+                            for upstream in job.upstream_jobs
+                        ),
+                    }
                 )
+            )
 
-                # 4. 檢查它的每一個下游任務
-                for down_job in job.downstream_jobs:
-                    if not down_job.enabled:
-                        continue  # 如果下游任務被停用了，就不用管它
+            triggered = 0
+            for job in candidates.values():
+                if self._dispatch_if_ready(db, job, latest):
+                    triggered += 1
+            return triggered
 
-                    logger.info(
-                        f"[Scheduler] Checking if downstream Job '{down_job.name}' is ready to run..."
-                    )
-                    all_upstreams_ready = True
+    @staticmethod
+    def _load_jobs_with_dependencies(db, job_ids: set[str]) -> dict[str, Job]:
+        """Load jobs with the two relationship hops the readiness check needs."""
+        jobs = (
+            db.query(Job)
+            .filter(Job.id.in_(job_ids))
+            .options(
+                selectinload(Job.downstream_jobs).selectinload(Job.upstream_jobs)
+            )
+            .all()
+        )
+        return {str(job.id): job for job in jobs}
 
-                    # 5. 針對這個下游任務，去檢查它的「所有上游」是不是都已經順利完成
-                    for up_job in down_job.upstream_jobs:
-                        # 從 Task 表撈出這個上游任務的「最新一筆執行紀錄」
-                        latest_up_task = (
-                            db.query(Task)
-                            .filter(Task.job_id == up_job.id)
-                            .order_by(Task.created_at.desc())
-                            .first()
-                        )
+    def _dispatch_if_ready(
+        self, db, job: Job, latest: dict[str, Task]
+    ) -> bool:
+        upstream_tasks = []
+        for upstream in job.upstream_jobs:
+            task = latest.get(str(upstream.id))
+            if task is None or task.status != "success":
+                logger.debug(
+                    "Downstream '%s' blocked: upstream '%s' is %s",
+                    job.name,
+                    upstream.name,
+                    task.status if task else "never run",
+                )
+                return False
+            upstream_tasks.append(task)
 
-                        # 如果連紀錄都沒有，或者最新狀態不是 success，就代表還沒準備好
-                        if not latest_up_task or latest_up_task.status != "success":
-                            logger.info(
-                                f"[Scheduler]   -> Blocked! Upstream Job '{up_job.name}' status is '{latest_up_task.status if latest_up_task else 'None'}'."
-                            )
-                            all_upstreams_ready = False
-                            break  # 只要有一個上游沒過關，就不需要再檢查其他上游了
+        if not upstream_tasks:
+            return False
 
-                    # 6. 如果所有上游都過關了，就發射這個下游任務！
-                    if all_upstreams_ready:
-                        new_task = Task(
-                            job_id=str(down_job.id),
-                            status="pending",
-                            trigger_type="dependency",
-                            retry_count=0,
-                        )
-                        task_repo.create(new_task)
-                        self.queue.send_task(str(new_task.id))
-                        counter += 1
+        # Idempotency guard. If this job already ran after the newest upstream
+        # completion, this cycle is re-observing work that has already been chained.
+        ready_at = max(_completed_at(task) for task in upstream_tasks)
+        own_latest = latest.get(str(job.id))
+        if own_latest is not None and _completed_at(own_latest) >= ready_at:
+            return False
 
-                        logger.info(
-                            f"[Scheduler]   -> All upstreams ready! Dependency triggered: "
-                            f"Job '{job.name}' -> Dispatched downstream Job '{down_job.name}' (New Task: {new_task.id})"
-                        )
-
-        return counter
+        task = Task(
+            job_id=str(job.id),
+            status="pending",
+            trigger_type="dependency",
+            retry_count=0,
+        )
+        TaskRepository(db).create(task)
+        self.queue.send_task(str(task.id))
+        logger.info(
+            "Dependency triggered: job='%s' task=%s (upstreams=%d)",
+            job.name,
+            task.id,
+            len(upstream_tasks),
+        )
+        return True
