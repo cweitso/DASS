@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
-# 關閉 Grafana + Prometheus 監控 overlay
+# Stop the observability overlay, leaving the rest of the stack running.
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-export COMPOSE_IGNORE_ORPHANS=true
-command -v docker >/dev/null 2>&1 || { echo "ERROR: 找不到 docker，請先安裝：https://docs.docker.com/engine/install/"; exit 1; }
-docker info >/dev/null 2>&1 || { echo "ERROR: Docker daemon 未運行，請先啟動 Docker。"; exit 1; }
-
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.observability.yml \
-  stop prometheus grafana cadvisor postgres-exporter sqs-exporter
-
-echo "Grafana 已關閉。"
+require_docker
+docker compose "${COMPOSE_OBSERVABILITY[@]}" stop "${OBSERVABILITY_SERVICES[@]}"
+echo "Observability stack stopped."
