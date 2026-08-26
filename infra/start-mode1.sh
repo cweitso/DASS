@@ -6,8 +6,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_docker
 ensure_env_file
 
+prepull_job_images
+
 echo "=== [1/3] Starting the Compose stack ==="
-docker compose "${COMPOSE_BASE[@]}" up -d \
+docker compose "${COMPOSE[@]}" up -d \
   traefik-pki traefik postgres postgres-replica pgbouncer localstack \
   api-server scheduler frontend worker autoscaler
 

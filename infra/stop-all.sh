@@ -6,7 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_docker
 
 echo "=== Stopping Compose services ==="
-docker compose "${COMPOSE_ALL[@]}" down
+docker compose "${COMPOSE[@]}" down
 
 echo ""
 echo "=== Stopping the kube-state-metrics port-forward ==="

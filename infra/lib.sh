@@ -9,11 +9,14 @@ cd "$REPO_ROOT"
 # real cleanup.
 export COMPOSE_IGNORE_ORPHANS=true
 
-# Compose file sets. The base stack always includes the local overlay: it is what
-# publishes ports 8000/3000 to the host and enables backend hot reload.
-COMPOSE_BASE=(-f docker-compose.yml -f docker-compose.local.yml)
-COMPOSE_OBSERVABILITY=(-f docker-compose.yml -f docker-compose.observability.yml)
-COMPOSE_ALL=(-f docker-compose.yml -f docker-compose.local.yml -f docker-compose.observability.yml)
+# One file set for every command in this directory.
+#
+# This must not vary between invocations. Compose compares the merged config of a
+# running container against the config it computes now, so bringing the
+# observability overlay up with a different -f combination silently RECREATES
+# postgres and localstack — which, on a first run, kills initdb midway through the
+# replication setup scripts and leaves a half-configured cluster behind.
+COMPOSE=(-f docker-compose.yml -f docker-compose.local.yml -f docker-compose.observability.yml)
 
 OBSERVABILITY_SERVICES=(prometheus grafana cadvisor postgres-exporter sqs-exporter)
 
@@ -50,8 +53,21 @@ wait_for_api() {
   echo "API ready: $(curl -fs http://localhost:8000/health)"
 }
 
+# Images that job containers run. Kept in sync with _SHELL_IMAGE / _HTTP_IMAGE in
+# backend/app/services/job_service.py. Pulling them up front matters: a job's
+# timeout covers the docker run, so on a cold machine the very first job races its
+# own image pull and fails with a misleading timeout.
+JOB_IMAGES=(alpine:3 curlimages/curl:8.6.0)
+
+prepull_job_images() {
+  echo "Pre-pulling job runner images..."
+  for image in "${JOB_IMAGES[@]}"; do
+    docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image"
+  done
+}
+
 start_observability() {
-  docker compose "${COMPOSE_OBSERVABILITY[@]}" up -d "${OBSERVABILITY_SERVICES[@]}"
+  docker compose "${COMPOSE[@]}" up -d "${OBSERVABILITY_SERVICES[@]}"
 }
 
 start_ksm_port_forward() {

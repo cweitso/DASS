@@ -8,7 +8,7 @@ require_docker
 
 echo "=== Removing Compose services and volumes ==="
 echo "    This deletes the Postgres data and all Grafana/Prometheus history."
-docker compose "${COMPOSE_ALL[@]}" down -v --remove-orphans
+docker compose "${COMPOSE[@]}" down -v --remove-orphans
 
 echo ""
 echo "=== Stopping the kube-state-metrics port-forward ==="

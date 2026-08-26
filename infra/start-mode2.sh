@@ -80,9 +80,11 @@ ensure_tool helm install_helm
 echo "All prerequisites present."
 
 echo ""
+prepull_job_images
+
 echo "=== [1/8] Starting the Compose stack (without workers) ==="
 ensure_env_file
-docker compose "${COMPOSE_BASE[@]}" up -d \
+docker compose "${COMPOSE[@]}" up -d \
   traefik-pki traefik postgres postgres-replica pgbouncer localstack \
   api-server scheduler frontend
 wait_for_api

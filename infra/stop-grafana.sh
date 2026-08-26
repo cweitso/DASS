@@ -4,5 +4,5 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 require_docker
-docker compose "${COMPOSE_OBSERVABILITY[@]}" stop "${OBSERVABILITY_SERVICES[@]}"
+docker compose "${COMPOSE[@]}" stop "${OBSERVABILITY_SERVICES[@]}"
 echo "Observability stack stopped."
