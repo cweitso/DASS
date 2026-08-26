@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import heapq
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.models.task import Task
 from app.repositories.job_repository import JobRepository
@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 # Heap entries and cached next_fire_at are compared as float timestamps, so allow a
 # little slack when deciding whether they still describe the same firing.
 _TIMESTAMP_EPSILON = 0.001
+
+# How far the incremental sync cursor is rewound after each pass.
+#
+# updated_at is stamped by the database (PostgreSQL now() is transaction start
+# time) while the cursor is taken from this process's clock. An exact cursor
+# therefore skips any change whose transaction began before the previous sync —
+# permanently, since the next pass moves the cursor further forward. Rewinding
+# re-reads a few rows, which costs nothing because sync is idempotent.
+_SYNC_OVERLAP_SECONDS = 10
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -44,6 +53,10 @@ class CronScheduler:
 
     def sync_jobs(self) -> None:
         """Pull jobs changed since the last sync into the cache and heap."""
+        # Captured before the read so changes made while this pass runs are picked
+        # up by the next one instead of falling into the gap.
+        started_at = utcnow()
+
         with self.session_maker() as db:
             jobs = JobRepository(db).list_updated_since(self.last_sync_at)
             db.expunge_all()
@@ -62,7 +75,7 @@ class CronScheduler:
                 heapq.heappush(self._heap, (job.next_fire_at.timestamp(), job_id))
             self._job_cache[job_id] = job
 
-        self.last_sync_at = utcnow()
+        self.last_sync_at = started_at - timedelta(seconds=_SYNC_OVERLAP_SECONDS)
 
     def _is_new_firing(self, job_id: str, next_fire_at: datetime) -> bool:
         cached = self._job_cache.get(job_id)
