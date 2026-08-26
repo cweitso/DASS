@@ -10,6 +10,8 @@ from app.models.job import Job
 from app.models.task import Task
 from app.queue.memory import MemoryQueueClient
 from app.services.worker_service import WorkerService
+
+pytestmark = pytest.mark.integration
 from app.utils.time import utcnow
 
 

@@ -313,6 +313,11 @@ def test_retry_enqueues_to_retry_queue(main_db, make_job, make_task, purge_queue
 
 
 def _scheduler_service(main_db):
+    """Build a SchedulerService plus both queues it dispatches to.
+
+    The two paths deliberately use different queues: cron dispatch goes to the
+    scheduled queue, dependency-triggered runs go to the normal one.
+    """
     from sqlalchemy.orm import sessionmaker
 
     from app.core.config import Settings
@@ -321,12 +326,14 @@ def _scheduler_service(main_db):
 
     settings = Settings(
         queue_name_scheduled=os.environ.get("DASS_QUEUE_NAME_SCHEDULED", "dass-tasks-scheduled"),
+        queue_name_normal=os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
         sqs_endpoint_url=os.environ.get("DASS_SQS_ENDPOINT_URL", "http://localhost:4566"),
         queue_backend="sqs",
     )
     scheduled_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_scheduled)
+    normal_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_normal)
     factory = sessionmaker(bind=main_db.get_bind())
-    return SchedulerService(factory, scheduled_sqs), scheduled_sqs
+    return SchedulerService(factory, scheduled_sqs, normal_sqs), scheduled_sqs, normal_sqs
 
 
 def test_dependency_chaining_enqueues_downstream(main_db, make_job, make_task, purge_queues):
@@ -337,7 +344,7 @@ def test_dependency_chaining_enqueues_downstream(main_db, make_job, make_task, p
     make_task(upstream.id, status="success", trigger_type="scheduled")
     main_db.flush()
 
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, _, normal_sqs = _scheduler_service(main_db)
     assert service.trigger_dependent_jobs() == 1
 
     main_db.expire_all()
@@ -349,7 +356,7 @@ def test_dependency_chaining_enqueues_downstream(main_db, make_job, make_task, p
     up_task = main_db.query(Task).filter(Task.job_id == upstream.id).one()
     assert up_task.processed_for_chaining is True
 
-    msgs = scheduled_sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
+    msgs = normal_sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
     assert len(msgs) >= 1
     assert json.loads(msgs[0].body)["task_id"] == str(down_tasks[0].id)
 
@@ -364,12 +371,12 @@ def test_dependency_chaining_blocks_until_all_upstreams_succeed(main_db, make_jo
     make_task(up_a.id, status="success", trigger_type="scheduled")  # A only; B has not run
     main_db.flush()
 
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, _, normal_sqs = _scheduler_service(main_db)
     assert service.trigger_dependent_jobs() == 0
 
     main_db.expire_all()
     assert main_db.query(Task).filter(Task.job_id == downstream.id).count() == 0
-    assert scheduled_sqs.receive_tasks(max_messages=1, wait_time_seconds=1) == []
+    assert normal_sqs.receive_tasks(max_messages=1, wait_time_seconds=1) == []
 
 
 def _dag_has_cycle(jobs: list[Job]) -> bool:
@@ -646,14 +653,15 @@ def test_leader_election_advisory_lock_is_exclusive(main_engine):
 
 def test_sync_jobs_evicts_disabled_job(main_db, make_job, purge_queues):
     """sync_jobs evicts a disabled job so it is never dispatched again."""
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, scheduled_sqs, _ = _scheduler_service(main_db)
     job = make_job(name="integ-tombstone", next_fire_at=datetime.now(UTC) - timedelta(seconds=10))
     main_db.flush()
     service.sync_jobs()
 
     job.enabled = False
     main_db.flush()
-    service.last_sync_at = None  # full rescan, avoiding clock skew on the cursor
+    # Force a full rescan. The cursor lives on the cron scheduler, not the facade.
+    service.cron_scheduler.last_sync_at = None
     service.sync_jobs()
 
     assert service.dispatch_due_jobs() == 0
@@ -662,7 +670,7 @@ def test_sync_jobs_evicts_disabled_job(main_db, make_job, purge_queues):
 
 def test_dispatch_forbid_skips_when_running_but_advances_next_fire_at(main_db, make_job, make_task, purge_queues):
     """concurrency_policy=forbid skips the run but still advances next_fire_at."""
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, scheduled_sqs, _ = _scheduler_service(main_db)
     job = make_job(
         name="integ-forbid",
         concurrency_policy="forbid",
@@ -682,7 +690,7 @@ def test_dispatch_forbid_skips_when_running_but_advances_next_fire_at(main_db, m
 
 def test_dispatch_advances_next_fire_at_and_does_not_double_fire(main_db, make_job, purge_queues):
     """After a dispatch, next_fire_at moves on and the same tick does not refire."""
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, scheduled_sqs, _ = _scheduler_service(main_db)
     job = make_job(name="integ-advance", next_fire_at=datetime.now(UTC) - timedelta(seconds=10))
     main_db.flush()
     service.sync_jobs()

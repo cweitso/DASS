@@ -1,7 +1,11 @@
 import threading
 import time
+
 import pytest
 from sqlalchemy import create_engine, text
+
+# Without this the -m integration run silently skipped the whole file.
+pytestmark = pytest.mark.integration
 
 
 def test_scheduler_leader_election(main_engine):
