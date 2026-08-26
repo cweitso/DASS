@@ -57,6 +57,11 @@ trusted in Keychain Access).
 
 ## Architecture
 
+> [`docs/architecture.md`](docs/architecture.md) has the full set — logical
+> architecture, both deployment topologies, the task lifecycle sequence and the state
+> machine — as PlantUML sources with rendered PNGs, each mapped to the code that
+> implements it. Start there when returning to this codebase after a break.
+
 ```mermaid
 flowchart LR
   Browser[Browser]
@@ -130,6 +135,7 @@ dass/
     postgres/         primary and replica bootstrap
     traefik/          dynamic config and local PKI
   scripts/            e2e_smoke.py, load generators, integration test runner
+  docs/               architecture.md and the PlantUML diagrams it embeds
   docker-compose.yml               base stack
   docker-compose.local.yml         dev overlay: source mounts, published ports
   docker-compose.observability.yml Prometheus + Grafana overlay

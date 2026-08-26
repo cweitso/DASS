@@ -1,0 +1,68 @@
+@startuml deployment-mode1
+' Mode 1 — everything in Docker Compose. Started by ./infra/start-mode1.sh
+
+title Mode 1 — Docker Compose deployment
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam roundcorner 8
+skinparam ArrowColor #555555
+skinparam nodesep 22
+skinparam ranksep 40
+
+node "Host machine" {
+
+  node "Docker network: dass_dass-net" as net {
+
+    component "traefik\n:8080 -> :8443" as traefik
+    component "frontend\n:3000" as frontend
+    component "api-server\n:8000" as api
+    component "scheduler" as sched
+    component "worker\n3 queue pools x 2 concurrent" as worker
+    component "autoscaler" as autoscaler
+    component "pgbouncer\n:6432" as pgb
+    database "postgres\n:5432  max_connections=100" as pg
+    database "postgres-replica" as pgr
+    component "localstack\n:4566  SQS" as ls
+
+    component "prometheus :9090" as prom
+    component "grafana :3001" as graf
+    component "cadvisor :8081" as cadv
+    component "postgres-exporter" as pgexp
+    component "sqs-exporter" as sqsexp
+  }
+
+  component "Job containers\ndocker run --rm, one per task" as jobs
+  component "Autoscaled workers\nlabel com.dass.autoscaled=true" as extra
+}
+
+traefik -down-> frontend
+traefik -down-> api
+api -down-> pgb
+api -down-> pgr
+api -down-> ls
+sched -down-> pg : direct :5432
+sched -down-> ls
+worker -down-> pgb
+worker -down-> ls
+pgb -down-> pg
+pg -right[#999999]-> pgr : streaming
+
+worker -right-> jobs : host Docker socket
+autoscaler -right-> extra : clone the baseline worker
+
+prom -[#999999]-> cadv
+prom -[#999999]-> pgexp
+prom -[#999999]-> sqsexp
+graf -[#999999]-> prom
+
+legend bottom
+  |= |= Worth remembering |
+  | **One worker, three pools** | A single process runs an independent pool per queue, each with its own concurrency budget, so a busy queue cannot starve a quiet one. |
+  | **Autoscaling** | Sizes the fleet from total queue depth (waiting + in-flight): ""ceil(depth / 20)"", clamped to [1, 10]. It only ever removes containers it created (""com.dass.autoscaled=true""). |
+  | **Job containers** | Image and command come from the job's ""runtime_spec"", compiled once at create/update time, so the worker never re-interprets ""action_config"". |
+  | **Connection budget** | The primary allows 100 connections. api-server, worker and autoscaler funnel through PgBouncer; the scheduler is the one direct client. |
+  | **Project name is pinned** | ""name: dass"" in the compose file keeps the network (""dass_dass-net"") and container names stable whatever the checkout directory is called. |
+endlegend
+
+@enduml

@@ -1,0 +1,43 @@
+@startuml task-states
+' The only legal task transitions. Anything else is a bug.
+
+title Task status transitions
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam state {
+  BackgroundColor #FAFAFA
+  BorderColor #999999
+}
+
+[*] --> pending : task created by the API,\nthe scheduler, or a retry
+
+pending --> running : worker wins the atomic claim\n(UPDATE ... WHERE status='pending')
+running --> success : container exits 0
+running --> failed : container fails **and**\nretry_count < max_retries
+running --> final_failed : container fails **and**\nretries are exhausted
+running --> pending : lock expired —\nthe scheduler reclaimed it
+
+failed --> [*] : a new task carries retry_count + 1
+success --> [*]
+final_failed --> [*] : POST /tasks/{id}/retry\ncreates a fresh task
+
+note right of pending
+  A message sits in exactly one queue:
+  normal (on demand or dependency),
+  scheduled (cron), or retry.
+end note
+
+note right of running
+  locked_by / locked_until are held by one
+  worker and refreshed by its heartbeat.
+  If that worker dies, the lock expires and
+  recover_orphans returns the task to pending.
+end note
+
+note bottom of failed
+  "failed" is not terminal — it records one
+  attempt. "final_failed" is where a job
+  actually gave up.
+end note
+@enduml
