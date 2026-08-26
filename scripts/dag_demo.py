@@ -8,8 +8,9 @@ from app.queue.factory import get_normal_queue_client
 
 
 def create_normal_job(db, name: str, downstream_jobs: list[Job] = None) -> Job:
-    """直接寫入資料庫建立一個沒有定時機制的 Normal Job"""
-    job_id = uuid.uuid4()  # 必須傳入 UUID 物件，不然 SQLAlchemy ORM 會對比失敗
+    """Insert a one-time job straight into the database, bypassing the API."""
+    # A UUID object, not a string: the GUID column compares as UUID in the ORM.
+    job_id = uuid.uuid4()
     job = Job(
         id=job_id,
         name=name,
@@ -22,8 +23,8 @@ def create_normal_job(db, name: str, downstream_jobs: list[Job] = None) -> Job:
         enabled=True,
         concurrency_policy="allow",
         max_retries=0,
-        job_type="normal",  # 改為 normal
-        cron_expression=None,  # 沒有 cron
+        job_type="normal",
+        cron_expression=None,
         next_fire_at=None,
     )
 
@@ -39,10 +40,10 @@ def main():
     print("=== Start creating C <- A, B (Many-to-One DAG Job) ===")
 
     with SessionLocal() as db:
-        # 1. 建立 Job C (下游)
+        # Downstream job C.
         job_c = create_normal_job(db, name=f"Normal-Job-C-{int(time.time())}")
 
-        # 2. 建立 Job A 和 Job B (上游)，並把它們的下游都指向 Job C
+        # Upstream jobs A and B, both pointing at C.
         job_a = create_normal_job(
             db, name=f"Normal-Job-A-{int(time.time())}", downstream_jobs=[job_c]
         )
@@ -54,7 +55,7 @@ def main():
 
         print(f"\nManually triggering Job A ({job_a.id}) and Job B ({job_b.id})...")
 
-        # 建立 A 和 B 的 Task
+        # One task each for A and B.
         task_a = Task(
             job_id=str(job_a.id), status="pending", trigger_type="manual", retry_count=0
         )
@@ -65,7 +66,7 @@ def main():
         db.add(task_b)
         db.commit()
 
-        # 將 Task IDs 推送給 Worker
+        # Hand the task ids to the workers.
         from app.core.config import get_settings
 
         settings = get_settings()
@@ -81,10 +82,10 @@ def main():
             "\n[WAITING] Waiting for Worker to finish and checking database for Job C..."
         )
 
-        # 這裡不只是印出 A 跟 B，我們期待 Scheduler 會自動觸發 C
+        # A and B run first; the scheduler should then trigger C on its own.
         for _ in range(15):
             time.sleep(1)
-            # 檢查 C 是否被觸發了
+            # Has C been triggered yet?
             tasks_c = db.query(Task).filter(Task.job_id == str(job_c.id)).all()
             if tasks_c:
                 task_c = tasks_c[0]

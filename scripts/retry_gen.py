@@ -39,7 +39,8 @@ DEFAULT_CA_CERT = REPO_ROOT / "infra" / "traefik" / "pki" / "rootCA.crt"
 def _payload(name: str, max_retries: int) -> dict[str, Any]:
     return {
         "name": name,
-        # 沒 cron → job_type='normal'。command 一定失敗(exit 1)→ worker 判定 success=False → 重試。
+        # No cron, so job_type='normal'. The command always exits 1, which makes
+        # the worker mark the run failed and enqueue a retry.
         "action_type": "shell",
         "action_config": {"command": "echo boom >&2; exit 1", "timeout_seconds": 5},
         "enabled": True,

@@ -76,7 +76,7 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
         sqs_endpoint_url=os.environ.get("DASS_SQS_ENDPOINT_URL", "http://localhost:4566"),
         queue_backend="sqs",
     )
-    # Scheduler 派發必須落 scheduled queue，normal queue 應保持空 — 對應 worker 端的 normal > scheduled > retry 優先序
+    # Cron dispatch must land on the scheduled queue and leave the normal one empty.
     normal_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_normal)
     scheduled_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_scheduled)
 
@@ -89,7 +89,7 @@ def test_scheduler_dispatch_enqueues_to_sqs(main_db, make_job, purge_queues):
     from sqlalchemy.orm import sessionmaker
     factory = sessionmaker(bind=main_db.get_bind())
     
-    # 修改為只傳入 session_maker 與 scheduled_sqs
+    # Cron dispatch only needs the scheduled queue.
     service = SchedulerService(factory, scheduled_sqs, scheduled_sqs)
     service.sync_jobs()
     
@@ -313,6 +313,11 @@ def test_retry_enqueues_to_retry_queue(main_db, make_job, make_task, purge_queue
 
 
 def _scheduler_service(main_db):
+    """Build a SchedulerService plus both queues it dispatches to.
+
+    The two paths deliberately use different queues: cron dispatch goes to the
+    scheduled queue, dependency-triggered runs go to the normal one.
+    """
     from sqlalchemy.orm import sessionmaker
 
     from app.core.config import Settings
@@ -321,23 +326,25 @@ def _scheduler_service(main_db):
 
     settings = Settings(
         queue_name_scheduled=os.environ.get("DASS_QUEUE_NAME_SCHEDULED", "dass-tasks-scheduled"),
+        queue_name_normal=os.environ.get("DASS_QUEUE_NAME_NORMAL", "dass-tasks-normal"),
         sqs_endpoint_url=os.environ.get("DASS_SQS_ENDPOINT_URL", "http://localhost:4566"),
         queue_backend="sqs",
     )
     scheduled_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_scheduled)
+    normal_sqs = SQSQueueClient(settings, queue_name=settings.queue_name_normal)
     factory = sessionmaker(bind=main_db.get_bind())
-    return SchedulerService(factory, scheduled_sqs), scheduled_sqs
+    return SchedulerService(factory, scheduled_sqs, normal_sqs), scheduled_sqs, normal_sqs
 
 
 def test_dependency_chaining_enqueues_downstream(main_db, make_job, make_task, purge_queues):
-    """全部上游成功後，trigger_dependent_jobs 應建立下游 dependency task 並送進 scheduled queue (S4 DAG)."""
+    """Once every upstream has succeeded, the downstream job is dispatched."""
     upstream = make_job(name="integ-chain-up")
     downstream = make_job(name="integ-chain-down")
     upstream.downstream_jobs.append(downstream)
     make_task(upstream.id, status="success", trigger_type="scheduled")
     main_db.flush()
 
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, _, normal_sqs = _scheduler_service(main_db)
     assert service.trigger_dependent_jobs() == 1
 
     main_db.expire_all()
@@ -349,34 +356,34 @@ def test_dependency_chaining_enqueues_downstream(main_db, make_job, make_task, p
     up_task = main_db.query(Task).filter(Task.job_id == upstream.id).one()
     assert up_task.processed_for_chaining is True
 
-    msgs = scheduled_sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
+    msgs = normal_sqs.receive_tasks(max_messages=1, wait_time_seconds=5)
     assert len(msgs) >= 1
     assert json.loads(msgs[0].body)["task_id"] == str(down_tasks[0].id)
 
 
 def test_dependency_chaining_blocks_until_all_upstreams_succeed(main_db, make_job, make_task, purge_queues):
-    """下游有兩個上游時，只要有一個上游還沒成功就不該被觸發 (S4 DAG fan-in)."""
+    """Fan-in: one unfinished upstream is enough to hold the downstream back."""
     up_a = make_job(name="integ-chain-a")
     up_b = make_job(name="integ-chain-b")
     downstream = make_job(name="integ-chain-c")
     up_a.downstream_jobs.append(downstream)
     up_b.downstream_jobs.append(downstream)
-    make_task(up_a.id, status="success", trigger_type="scheduled")  # 只有 A 成功，B 還沒跑
+    make_task(up_a.id, status="success", trigger_type="scheduled")  # A only; B has not run
     main_db.flush()
 
-    service, scheduled_sqs = _scheduler_service(main_db)
+    service, _, normal_sqs = _scheduler_service(main_db)
     assert service.trigger_dependent_jobs() == 0
 
     main_db.expire_all()
     assert main_db.query(Task).filter(Task.job_id == downstream.id).count() == 0
-    assert scheduled_sqs.receive_tasks(max_messages=1, wait_time_seconds=1) == []
+    assert normal_sqs.receive_tasks(max_messages=1, wait_time_seconds=1) == []
 
 
 def _dag_has_cycle(jobs: list[Job]) -> bool:
-    """以 DFS + 三色標記偵測 job_dependencies 有向圖是否含環。
+    """Three-colour DFS over job_dependencies, looking for a back edge.
 
-    WHITE=未訪問 / GRAY=在當前遞迴路徑上 / BLACK=已完成。
-    DFS 過程中若走到一個仍是 GRAY 的節點，代表遇到回邊 (back edge)，即有環。
+    WHITE = unvisited, GRAY = on the current path, BLACK = finished. Reaching a
+    GRAY node means a back edge, which means a cycle.
     """
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[str, int] = {str(j.id): WHITE for j in jobs}
@@ -388,7 +395,7 @@ def _dag_has_cycle(jobs: list[Job]) -> bool:
         color[node] = GRAY
         for nxt in adjacency.get(node, []):
             if color.get(nxt) == GRAY:
-                return True  # 回邊 → 有環
+                return True  # back edge, so there is a cycle
             if color.get(nxt) == WHITE and visit(nxt):
                 return True
         color[node] = BLACK
@@ -398,27 +405,27 @@ def _dag_has_cycle(jobs: list[Job]) -> bool:
 
 
 def test_dag_cycle_detection_on_real_postgres(main_db, make_job):
-    """job_dependencies 存進真實 PostgreSQL 後，能從持久化的邊判斷 DAG 有無 cycle。
+    """Edges survive a round trip through the self-referential association table.
 
-    系統目前不在建立關聯時阻擋成環（runtime 靠 processed_for_chaining 防無限迴圈），
-    這支測試守住的是：經過自關聯多對多 association table round-trip 後，圖的邊資訊
-    完整無損，cycle 偵測能在無環鏈上回 False、在補成環後回 True。
+    What is guarded here is the persistence layer, not the API: after writing and
+    re-reading job_dependencies, cycle detection still answers correctly on both
+    an acyclic chain and the same chain closed into a loop.
     """
     a = make_job(name="integ-dag-a")
     b = make_job(name="integ-dag-b")
     c = make_job(name="integ-dag-c")
 
-    # 先建一條無環鏈 A→B→C，判定應為「無環」
+    # An acyclic chain A -> B -> C.
     a.downstream_jobs.append(b)
     b.downstream_jobs.append(c)
     main_db.flush()
-    main_db.expire_all()  # 清掉 identity map 的關聯快取，強制重新從 DB 讀邊
+    main_db.expire_all()  # drop cached relationships so the edges are re-read
 
     job_ids = [a.id, b.id, c.id]
     jobs = main_db.query(Job).filter(Job.id.in_(job_ids)).all()
     assert _dag_has_cycle(jobs) is False
 
-    # 補一條 C→A 形成環 A→B→C→A，判定應為「有環」
+    # Close the loop with C -> A.
     main_db.get(Job, c.id).downstream_jobs.append(main_db.get(Job, a.id))
     main_db.flush()
     main_db.expire_all()
@@ -450,7 +457,7 @@ def _override_db(main_db):
 
 
 def test_concurrent_claim_only_one_worker_wins(main_engine, purge_queues):
-    """兩個 worker 在獨立連線上同時搶同一個 pending task，只能一個成功 claim — 系統第一鐵律：不重複執行。"""
+    """Two workers racing for one pending task: exactly one may claim it."""
     import threading
 
     from sqlalchemy.orm import sessionmaker
@@ -459,7 +466,7 @@ def test_concurrent_claim_only_one_worker_wins(main_engine, purge_queues):
     from app.services.worker_service import WorkerService
 
     Session = sessionmaker(bind=main_engine)
-    # 用獨立連線把資料 commit 進真實 DB，兩個 worker 的連線才都看得到
+    # Commit on a separate connection so both workers' connections can see it.
     setup = Session()
     job = Job(
         id=str(uuid4()),
@@ -516,7 +523,7 @@ def test_concurrent_claim_only_one_worker_wins(main_engine, purge_queues):
 
 
 def test_normal_job_end_to_end_via_api_and_worker(main_db, purge_queues, monkeypatch):
-    """API 建立 no-cron job → 自動進 normal queue → worker 撈起執行 → task success（one-time job 全鏈路）。"""
+    """Full path for a one-time job: create -> normal queue -> worker -> success."""
     from fastapi.testclient import TestClient
 
     from app.api.deps import get_db
@@ -564,7 +571,7 @@ def test_normal_job_end_to_end_via_api_and_worker(main_db, purge_queues, monkeyp
 
 
 def test_trigger_endpoint_enqueues_to_normal_queue(main_db, make_job, purge_queues, monkeypatch):
-    """POST /jobs/{id}/trigger 必須把 task 送進 normal queue，trigger_type=manual。"""
+    """/trigger enqueues on the normal queue with trigger_type=manual."""
     from fastapi.testclient import TestClient
 
     from app.api.deps import get_db
@@ -591,7 +598,7 @@ def test_trigger_endpoint_enqueues_to_normal_queue(main_db, make_job, purge_queu
 
 
 def test_retry_endpoint_enqueues_to_retry_queue(main_db, make_job, make_task, purge_queues, monkeypatch):
-    """POST /tasks/{id}/retry 必須建立 retry_count+1 的新 task 並送進 retry queue。"""
+    """/retry creates a task with retry_count+1 and enqueues it on the retry queue."""
     from fastapi.testclient import TestClient
 
     from app.api.deps import get_db
@@ -625,10 +632,10 @@ def test_retry_endpoint_enqueues_to_retry_queue(main_db, make_job, make_task, pu
 
 
 def test_leader_election_advisory_lock_is_exclusive(main_engine):
-    """pg_try_advisory_lock：第一條連線拿到鎖，第二條同 key 拿不到——scheduler leader election 的基石。"""
+    """pg_try_advisory_lock: the second connection cannot take a held key."""
     from sqlalchemy import text
 
-    LOCK_KEY = 114514  # 與 cli.run_scheduler 的 LOCK_KEY 一致
+    LOCK_KEY = 114514  # must match app.cli._LEADER_LOCK_KEY
     c1 = main_engine.connect()
     c2 = main_engine.connect()
     try:
@@ -645,15 +652,16 @@ def test_leader_election_advisory_lock_is_exclusive(main_engine):
 
 
 def test_sync_jobs_evicts_disabled_job(main_db, make_job, purge_queues):
-    """停用的 scheduled job 經 sync_jobs 後要從 cache 逐出，不再被 dispatch（tombstone）。"""
-    service, scheduled_sqs = _scheduler_service(main_db)
+    """sync_jobs evicts a disabled job so it is never dispatched again."""
+    service, scheduled_sqs, _ = _scheduler_service(main_db)
     job = make_job(name="integ-tombstone", next_fire_at=datetime.now(UTC) - timedelta(seconds=10))
     main_db.flush()
     service.sync_jobs()
 
     job.enabled = False
     main_db.flush()
-    service.last_sync_at = None  # 強制全量重掃，跳過 updated_at 增量游標的時鐘誤差
+    # Force a full rescan. The cursor lives on the cron scheduler, not the facade.
+    service.cron_scheduler.last_sync_at = None
     service.sync_jobs()
 
     assert service.dispatch_due_jobs() == 0
@@ -661,8 +669,8 @@ def test_sync_jobs_evicts_disabled_job(main_db, make_job, purge_queues):
 
 
 def test_dispatch_forbid_skips_when_running_but_advances_next_fire_at(main_db, make_job, make_task, purge_queues):
-    """concurrency_policy=forbid 且已有 running task 時不派發，但 next_fire_at 仍要前進。"""
-    service, scheduled_sqs = _scheduler_service(main_db)
+    """concurrency_policy=forbid skips the run but still advances next_fire_at."""
+    service, scheduled_sqs, _ = _scheduler_service(main_db)
     job = make_job(
         name="integ-forbid",
         concurrency_policy="forbid",
@@ -681,8 +689,8 @@ def test_dispatch_forbid_skips_when_running_but_advances_next_fire_at(main_db, m
 
 
 def test_dispatch_advances_next_fire_at_and_does_not_double_fire(main_db, make_job, purge_queues):
-    """派發後 next_fire_at 前進到下個 cron tick；同一輪再 dispatch 不會重複發射。"""
-    service, scheduled_sqs = _scheduler_service(main_db)
+    """After a dispatch, next_fire_at moves on and the same tick does not refire."""
+    service, scheduled_sqs, _ = _scheduler_service(main_db)
     job = make_job(name="integ-advance", next_fire_at=datetime.now(UTC) - timedelta(seconds=10))
     main_db.flush()
     service.sync_jobs()

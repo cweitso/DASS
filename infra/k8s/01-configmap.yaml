@@ -4,14 +4,17 @@ metadata:
   name: dass-config
   namespace: dass
 data:
-  # Point at Docker Compose postgres/localstack/pgbouncer on the host machine.
-  # host.minikube.internal resolves to the bridge IP (192.168.49.1) from inside all pods.
-  # api + worker 走 host 上的 pgbouncer(6432)做連線匯流：KEDA 會把 worker pod 擴到很多個,
-  # 全部直連 Postgres 會超過 max_connections;pgbouncer 把伺服器連線收斂在固定數量。
-  # 例外:scheduler 在 06-scheduler.yaml 覆寫成直連 5432(pg_advisory_lock 是 session 級鎖,
-  # 走 pgbouncer transaction pooling 會失效)。
+  # Every pod talks to the Docker Compose stack on the host machine.
+  # host.minikube.internal resolves to the bridge IP (192.168.49.1) from inside pods.
+  #
+  # api + worker go through pgbouncer (6432): KEDA scales workers to many pods and
+  # connecting each one straight to Postgres would blow past max_connections.
+  # The scheduler overrides this to a direct 5432 connection in 06-scheduler.yaml,
+  # because its leader election needs a session-level advisory lock.
   DASS_DATABASE_URL: "postgresql+psycopg://dass:dass@host.minikube.internal:6432/dass"
-  DASS_REPLICA_DATABASE_URL: "postgresql+psycopg://dass:dass@host.minikube.internal:5432/dass"
+  # DASS_REPLICA_DATABASE_URL is intentionally unset. The Compose replica is not
+  # reachable from the cluster, and pointing it at the primary would open a second
+  # pool to the same server. Unset means reads reuse the primary engine.
   DASS_SQS_ENDPOINT_URL: "http://host.minikube.internal:4566"
   DASS_QUEUE_BACKEND: "sqs"
   DASS_QUEUE_NAME_NORMAL: "dass-tasks-normal"
@@ -21,7 +24,7 @@ data:
   DASS_AWS_ACCESS_KEY_ID: "dass"
   DASS_AWS_SECRET_ACCESS_KEY: "dass"
   DASS_LOG_LEVEL: "INFO"
-  # Worker spawns job containers as K8s Jobs — KEDA handles replica scaling.
+  # Workers submit each task as a Kubernetes Job; KEDA owns replica scaling.
   DASS_EXECUTION_BACKEND: "kubernetes"
   DASS_K8S_NAMESPACE: "dass"
   DASS_K8S_POLL_INTERVAL_SECONDS: "2.0"

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, aliased
 
 from app.models.task import Task
 
@@ -12,98 +12,29 @@ class TaskRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    # ── 基本 CRUD ──────────────────────────────────────
+    # ── Writes ────────────────────────────────────────────────────────────────
 
     def create(self, task: Task) -> Task:
-
+        # No refresh: the caller only needs `id` (client-side uuid4) and `status`
+        # (set on the instance), and with expire_on_commit=False both survive the
+        # commit. Refreshing here used to route a SELECT to the replica and fail on
+        # replication lag under load.
         self.db.add(task)
         self.db.commit()
-        # self.db.refresh(task) # if no force primary, this refresh might hit the replica and get stale data due to replica lag
-        return task  # basically almost nobdy read this returned task
-
-    def create_without_commit(self, task: Task) -> Task:
-
-        self.db.add(task)
         return task
-
-    def get(self, task_id: str) -> Task | None:
-
-        return self.db.get(Task, task_id)
-
-    # ── 查詢 ───────────────────────────────────────────
-
-    def list_by_job(self, job_id: str) -> list[Task]:
-
-        stmt = (
-            select(Task).where(Task.job_id == job_id).order_by(Task.created_at.desc())
-        )
-        return list(self.db.scalars(stmt).all())
-
-    def count_running_for_job(self, job_id: str) -> int:
-
-        stmt = (
-            select(func.count())
-            .select_from(Task)
-            .where(Task.job_id == job_id, Task.status == "running")
-        )
-        return self.db.scalar(stmt)
-
-    def get_unprocessed_successful_tasks(self, limit: int = 100) -> list[Task]:
-        """撈出已經成功，但尚未被 Scheduler 處理過相依性的 Task"""
-        stmt = (
-            select(Task)
-            .where(Task.status == "success", Task.processed_for_chaining == False)
-            .limit(limit)
-        )
-        return list(self.db.scalars(stmt).all())
-
-    # ── 原子性 Claim（最關鍵！）─────────────────────────
-
-    def claim_pending(
-        self, task_id: str, worker_id: str, locked_until: datetime
-    ) -> Task | None:
-
-        stmt = (
-            update(Task)
-            .where(Task.id == task_id, Task.status == "pending")
-            .values(
-                status="running",
-                locked_by=worker_id,
-                locked_until=locked_until,
-                started_at=func.now(),
-            )
-            # 這行咒語強迫 SQLAlchemy 放棄快取，直接重新同步, 用 evaluate 可以提升效能( 少一次 select )但會導致快取未同步
-            .execution_options(synchronize_session="fetch")
-        )
-
-        result = self.db.execute(stmt)
-
-        if result.rowcount == 0:
-            self.db.commit()
-            return None
-        else:
-            self.db.commit()
-            return self.get(task_id)
-
-    # ── 狀態更新 ────────────────────────────────────────
 
     def mark_success(self, task: Task, stdout: str | None, stderr: str | None) -> Task:
-
-        task.status = "success"
-        task.stdout = stdout
-        task.stderr = stderr
-        task.locked_by = None
-        task.locked_until = None
-        task.finished_at = datetime.now(UTC)
-        self.db.commit()
-        self.db.refresh(task)
-        return task
+        return self._finish(task, "success", stdout, stderr)
 
     def mark_failed(
         self, task: Task, stdout: str | None, stderr: str | None, final: bool = False
     ) -> Task:
+        return self._finish(task, "final_failed" if final else "failed", stdout, stderr)
 
-        task.status = "final_failed" if final else "failed"
+    def _finish(
+        self, task: Task, status: str, stdout: str | None, stderr: str | None
+    ) -> Task:
+        task.status = status
         task.stdout = stdout
         task.stderr = stderr
         task.locked_by = None
@@ -114,7 +45,7 @@ class TaskRepository:
         return task
 
     def mark_running_expired_pending(self, task: Task) -> Task:
-
+        """Release an expired lock so the task can be claimed again."""
         task.status = "pending"
         task.locked_by = None
         task.locked_until = None
@@ -123,8 +54,31 @@ class TaskRepository:
         self.db.refresh(task)
         return task
 
-    def list_expired_running(self, now: datetime) -> list[Task]:
+    def mark_processed_for_chaining(self, task: Task) -> Task:
+        task.processed_for_chaining = True
+        self.db.commit()
+        return task
 
+    # ── Reads ─────────────────────────────────────────────────────────────────
+
+    def get(self, task_id: str) -> Task | None:
+        return self.db.get(Task, task_id)
+
+    def list_by_job(self, job_id: str) -> list[Task]:
+        stmt = (
+            select(Task).where(Task.job_id == job_id).order_by(Task.created_at.desc())
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def count_running_for_job(self, job_id: str) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Task)
+            .where(Task.job_id == job_id, Task.status == "running")
+        )
+        return self.db.scalar(stmt) or 0
+
+    def list_expired_running(self, now: datetime) -> list[Task]:
         stmt = select(Task).where(
             Task.status == "running",
             Task.locked_until.is_not(None),
@@ -132,8 +86,36 @@ class TaskRepository:
         )
         return list(self.db.scalars(stmt).all())
 
-    def mark_processed_for_chaining(self, task: Task) -> Task:
-        """標記該 Task 已經被 Scheduler 處理過相依性了"""
-        task.processed_for_chaining = True
-        self.db.commit()
-        return task
+    def get_unprocessed_successful_tasks(self, limit: int = 100) -> list[Task]:
+        """Successful tasks whose downstream dependencies have not been evaluated."""
+        stmt = (
+            select(Task)
+            .where(Task.status == "success", Task.processed_for_chaining.is_(False))
+            .order_by(Task.created_at)
+            .limit(limit)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def latest_task_per_job(self, job_ids: list[str]) -> dict[str, Task]:
+        """Most recent task for each of the given jobs, in a single query.
+
+        The dependency scheduler needs this for every upstream and downstream of
+        every job it evaluates; querying per job turned one scheduler cycle into
+        hundreds of round trips.
+        """
+        if not job_ids:
+            return {}
+
+        ranked = (
+            select(
+                Task,
+                func.row_number()
+                .over(partition_by=Task.job_id, order_by=Task.created_at.desc())
+                .label("rank"),
+            )
+            .where(Task.job_id.in_(job_ids))
+            .subquery()
+        )
+        ranked_task = aliased(Task, ranked)
+        stmt = select(ranked_task).where(ranked.c.rank == 1)
+        return {str(task.job_id): task for task in self.db.scalars(stmt).all()}

@@ -8,10 +8,9 @@ from botocore.config import Config
 from app.core.config import Settings
 from app.queue.base import QueueMessage
 
-# botocore 預設每個 client 只有 10 條 HTTP 連線。api-server 的 /trigger 是同步端點、
-# 跑在 FastAPI 執行緒池（預設 ~40 緒），又共用同一個 lru_cache 的 client；10 條連線會
-# 把高併發的 send_message 卡成序列化（壓測 trigger 階段的隱形天花板）。開大到能蓋過
-# 執行緒池並留餘裕。
+# botocore defaults to 10 HTTP connections per client. /trigger is a sync endpoint
+# served from FastAPI's ~40-thread pool and every thread shares one cached client, so
+# 10 connections serialise send_message under load. Size this above the thread pool.
 _MAX_POOL_CONNECTIONS = 50
 
 
@@ -52,8 +51,9 @@ class SQSQueueClient:
 
     def receive_tasks(self, max_messages: int = 1, wait_time_seconds: int = 10) -> list[QueueMessage]:
         # Long polling: SQS waits up to wait_time_seconds for a message.
-        # 短 visibility + worker 端 heartbeat 動態延長：crash 時 SQS message 很快回到可見狀態，
-        # scheduler.recover_orphans 也只要等 DB lock 過期（同樣 30s 等級）就能 reclaim
+        # Short visibility plus worker-side heartbeat extension: a crashed worker's
+        # message becomes visible again within one window, matching how quickly the
+        # scheduler can reclaim the DB lock.
         response = self.client.receive_message(
             QueueUrl=self.queue_url,
             MaxNumberOfMessages=max_messages,

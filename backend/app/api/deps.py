@@ -1,4 +1,16 @@
-from app.core.security import get_db, get_worker_id
+from __future__ import annotations
 
-__all__ = ["get_db", "get_worker_id"]
+from collections.abc import Iterator
 
+from sqlalchemy.orm import Session
+
+from app.db.session import SessionLocal
+
+
+def get_db() -> Iterator[Session]:
+    """Per-request session. Closing without a commit rolls the request back."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

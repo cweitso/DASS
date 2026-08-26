@@ -1,0 +1,59 @@
+@startuml deployment-mode2
+' Mode 2 — Compose infrastructure, Kubernetes workers. ./infra/start-mode2.sh
+
+title Mode 2 — Kubernetes workers with KEDA
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam roundcorner 8
+skinparam ArrowColor #555555
+skinparam nodesep 20
+skinparam ranksep 45
+
+node "Host machine — Docker Compose" as host {
+  component "traefik :8443\nfrontend :3000\napi-server :8000" as capi
+  component "scheduler" as csched
+  component "pgbouncer :6432" as pgb
+  database "postgres :5432" as pg
+  database "postgres-replica" as pgr
+  component "localstack :4566\nSQS" as ls
+  component "prometheus :9090\ngrafana :3001" as obs
+}
+
+node "Minikube — 2 nodes" as mk {
+  package "namespace: dass" as nsdass {
+    component "dass-api" as kapi
+    component "dass-scheduler" as ksched
+    component "dass-worker-normal      1..3 pods\ndass-worker-scheduled  1..3 pods\ndass-worker-retry         1..3 pods" as workers
+    component "K8s Jobs\none per task, TTL 600s" as kjobs
+  }
+  package "namespace: keda" as nskeda {
+    component "KEDA operator" as keda
+  }
+  package "kube-system" as nsks {
+    component "kube-state-metrics\nNodePort 30091" as ksm
+  }
+}
+
+capi -down-> pgb
+csched -down-> pg
+pgb -down-> pg
+pg -right[#999999]-> pgr
+
+workers -up-> pgb : host.minikube.internal:6432
+workers -up-> ls : host.minikube.internal:4566
+ksched -up-> pg : host.minikube.internal:5432
+keda -up-> ls : poll depth
+keda -left-> workers : scale 1..3
+workers -down-> kjobs : create
+obs -[#999999]-> ksm : scrape via port-forward
+
+legend bottom
+  |= |= Worth remembering |
+  | **No in-cluster datastore** | PostgreSQL and LocalStack stay in Compose. Every pod reaches them through ""host.minikube.internal"". |
+  | **Job URLs** | A job whose ""action_config.url"" points at this machine must use ""host.minikube.internal"" too — ""api-server"" is a Compose name pods cannot resolve. |
+  | **KEDA sizing** | One ScaledObject per queue: ""ceil(queue_depth / 20)"", clamped to [1, 3]. Three, not ten, because each worker pod also creates job pods — 3 queues x 3 workers x 2 concurrent is already 18 job pods on two nodes. |
+  | **Two schedulers** | One in Compose, one in the cluster. They contend on the same advisory lock, so exactly one leads. |
+  | **Deploying a change** | ""minikube image load"" keeps the old image when the tag exists. Push with ""docker save \| minikube ssh -n <node> -- docker load"" on every node. |
+endlegend
+@enduml

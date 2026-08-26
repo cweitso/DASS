@@ -1,0 +1,99 @@
+@startuml component-overview
+' DASS — logical architecture.
+' Carries the constraints that a box diagram alone would lose: which component may
+' reach which database endpoint, and why each queue exists separately.
+
+title DASS — logical architecture
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam roundcorner 8
+skinparam ArrowColor #555555
+skinparam nodesep 25
+skinparam ranksep 45
+skinparam package {
+  BackgroundColor #FAFAFA
+  BorderColor #BBBBBB
+}
+
+actor "Browser /\nAPI client" as Client
+
+package "Edge" {
+  [Traefik\n:8443 TLS] as Traefik
+}
+
+package "Application" {
+  [Next.js frontend\n:3000] as Frontend
+  [FastAPI API server\n:8000] as API
+  [Scheduler\nsingle leader] as Scheduler
+  [Autoscaler\nmode 1 only] as Autoscaler
+}
+
+package "Queues (SQS / LocalStack)" {
+  queue "normal\non-demand runs" as QNormal
+  queue "scheduled\ncron dispatches" as QSched
+  queue "retry\nre-runs" as QRetry
+}
+
+package "Workers" {
+  [Worker pool\nper queue] as Worker
+  [Job container\nalpine / curl] as JobContainer
+}
+
+package "Storage" {
+  [PgBouncer\n:6432 transaction pooling] as PgBouncer
+  database "PostgreSQL primary\nsource of truth" as Primary
+  database "PostgreSQL replica\nread-only" as Replica
+}
+
+Client -down-> Traefik
+Traefik -down-> Frontend
+Traefik -down-> API : /api /health\n/metrics /docs
+Frontend -right-> API : server-side\nrewrites
+
+API -down-> QNormal : trigger,\ncreate one-time job
+Scheduler -down-> QSched : cron dispatch
+Scheduler -down-> QNormal : dependency (DAG) dispatch
+Autoscaler -right-> Worker : add / remove
+
+QNormal -down-> Worker
+QSched -down-> Worker
+QRetry -down-> Worker
+Worker -up-> QRetry : re-enqueue\non failure
+Worker -right-> JobContainer : run runtime_spec
+
+API -down-> PgBouncer : writes +\nread-after-write
+Worker -down-> PgBouncer : claim, heartbeat, result
+PgBouncer -down-> Primary
+Scheduler -down-> Primary : **direct**, bypasses PgBouncer
+API -down-> Replica : plain SELECTs
+Primary -right[#999999]-> Replica : streaming\nreplication
+
+note right of Scheduler
+  **Why the scheduler bypasses PgBouncer**
+  Leader election holds a //session-level//
+  advisory lock. Transaction pooling hands the
+  server connection back at commit, which drops
+  the lock and elects several leaders at once.
+end note
+
+note right of Worker
+  **Claim protocol**
+  1. ""UPDATE ... WHERE status='pending'"" —
+     atomic, exactly one worker wins
+  2. A heartbeat extends the DB lock //and// the
+     queue message visibility together, so a
+     crashed worker loses both at once and the
+     task is reclaimable within one window
+  3. On failure, re-enqueue to the retry queue
+     until ""max_retries"" is reached
+end note
+
+note bottom of Replica
+  Reads fall back to the primary when the session
+  has just written. With no replica configured,
+  one engine is shared instead of a second pool
+  being opened against the same server.
+end note
+@enduml

@@ -3,6 +3,12 @@ from app.scheduler.dependency_scheduler import DependencyScheduler
 
 
 class SchedulerService:
+    """Facade over the two independent scheduling strategies.
+
+    Cron dispatches go to the scheduled queue; dependency-triggered runs go to the
+    normal queue, so cron backlog and DAG fan-out scale separately.
+    """
+
     def __init__(
         self,
         session_maker,
@@ -15,7 +21,7 @@ class SchedulerService:
         )
         self.dependency_scheduler = DependencyScheduler(session_maker, normal_queue)
 
-    def sync_jobs(self):
+    def sync_jobs(self) -> None:
         self.cron_scheduler.sync_jobs()
 
     def recover_orphans(self) -> int:

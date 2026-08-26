@@ -1,646 +1,798 @@
 # DASS
 
-`DASS` is a Distributed Asynchronous Scheduling System: a production-style MVP for creating, scheduling, dispatching, and observing internal jobs.
+`DASS` is a Distributed Asynchronous Scheduling System: a production-style MVP for
+creating, scheduling, dispatching and observing internal jobs.
 
-## Stack
+A **job** is a definition — what to run, and when. A **task** is one run of that job.
+Jobs reach a worker through a queue, workers execute each task inside a throwaway
+container, and PostgreSQL is the source of truth for both.
 
-- Backend: Python 3.12, FastAPI, SQLAlchemy 2.x, Alembic, Pydantic, boto3, httpx, croniter
-- Frontend: Next.js, React, TypeScript, TanStack Query, Tailwind CSS
-- Proxy: Traefik
-- Database: PostgreSQL
-- Queue: AWS SQS, with LocalStack for local development
+- **Backend** — Python 3.12, FastAPI, SQLAlchemy 2.x, Alembic, Pydantic, boto3, croniter
+- **Frontend** — Next.js, React, TypeScript, TanStack Query, Tailwind CSS
+- **Database** — PostgreSQL with a streaming read replica, pooled through PgBouncer
+- **Queue** — AWS SQS, backed by LocalStack for local development
+- **Proxy** — Traefik, terminating TLS on a locally generated CA
+- **Observability** — Prometheus, Grafana, cAdvisor, postgres-exporter, a custom SQS exporter
 
-## Quick Commands
+---
+
+## Quick start
 
 ```bash
-# 啟動模式一（純 Docker Compose，含 worker）
-./infra/start-mode1.sh
-
-# 啟動模式二（Docker Compose 基礎服務 + K8s Worker，KEDA 自動擴縮）
-./infra/start-mode2.sh
-
-# 完全關閉並清除所有服務（Docker Compose + Minikube，會刪除資料卷）
-./infra/down-all.sh
-
-# 開啟 Grafana 監控
-./infra/start-grafana.sh          # → http://localhost:3001
-
-# 關閉 Grafana
-./infra/stop-grafana.sh
-
-# 壓力測試（可指定 job 數，預設 100）
-./infra/load-test.sh 200
+./infra/start-mode1.sh        # everything in Docker Compose
+python3 scripts/e2e_smoke.py  # verify the whole pipeline end to end
+./infra/down-all.sh           # stop and delete the data
 ```
+
+| Command | What it does |
+|---|---|
+| `./infra/start-mode1.sh` | Mode 1 — the full stack in Docker Compose, workers included |
+| `./infra/start-mode2.sh` | Mode 2 — Compose infrastructure, Kubernetes workers scaled by KEDA |
+| `./infra/stop-all.sh` | Stop everything, **keep** the data |
+| `./infra/down-all.sh` | Stop everything and **delete** the volumes |
+| `./infra/start-grafana.sh` | Bring up Prometheus and Grafana on their own |
+| `./infra/stop-grafana.sh` | Stop the observability overlay only |
+| `./infra/load-test.sh [n]` | Create and trigger *n* jobs through the API (default 100) |
+
+Both start scripts are idempotent: re-running one converges the stack on that mode,
+including standing down the other mode's workers.
+
+### Where things listen
+
+| Service | URL | Notes |
+|---|---|---|
+| Frontend | http://localhost:3000 | |
+| API | http://localhost:8000 | OpenAPI UI at `/docs` |
+| Traefik | https://dass.localhost:8443 | Public entrypoint, TLS; `:8080` redirects here |
+| Grafana | http://localhost:3001 | `/d/dass-overview` (mode 1), `/d/dass-k8s` (mode 2) |
+| Prometheus | http://localhost:9090 | |
+| cAdvisor | http://localhost:8081 | Per-container CPU and memory |
+
+`*.localhost` resolves to the loopback address automatically — no `/etc/hosts` entry
+is needed. To make the browser trust the local TLS certificate, add
+`infra/traefik/pki/rootCA.crt` to your trust store (on macOS: open it and mark it
+trusted in Keychain Access).
 
 ---
 
 ## Architecture
 
+> [`docs/architecture.md`](docs/architecture.md) has the full set — logical
+> architecture, both deployment topologies, the task lifecycle sequence and the state
+> machine — as PlantUML sources with rendered PNGs, each mapped to the code that
+> implements it. Start there when returning to this codebase after a break.
+
 ```mermaid
 flowchart LR
   Browser[Browser]
-  Traefik[Traefik Reverse Proxy\n:80]
-  Frontend[Next.js Frontend\ninternal :3000]
-  API[FastAPI API Server\ninternal :8000]
-  Scheduler[Scheduler Worker]
-  Worker[Job Worker]
-  DB[(PostgreSQL)]
-  Queue[(AWS SQS / LocalStack)]
+  Traefik[Traefik\n:8443]
+  Frontend[Next.js frontend]
+  API[FastAPI API server]
+  Scheduler[Scheduler]
+  Worker[Workers]
+  PgBouncer[(PgBouncer)]
+  DB[(PostgreSQL primary)]
+  Replica[(PostgreSQL replica)]
+  Queue[(SQS: normal / scheduled / retry)]
+
   Browser --> Traefik
   Traefik --> Frontend
-  Traefik -->|/api, /health, /metrics, docs| API
-  Frontend -->|server-side API rewrites| API
-  API --> DB
-  API --> Queue
-  Scheduler --> DB
-  Scheduler --> Queue
-  Worker --> DB
-  Worker --> Queue
+  Traefik -->|/api, /health, /metrics, /docs| API
+  Frontend -->|server-side rewrites| API
+  API --> PgBouncer
+  API -->|reads| Replica
+  API -->|enqueue| Queue
+  Scheduler -->|direct, for advisory lock| DB
+  Scheduler -->|enqueue| Queue
   Queue --> Worker
+  Worker --> PgBouncer
+  PgBouncer --> DB
 ```
 
-Traefik is the public entrypoint. It load-balances the frontend and API containers, while the frontend still uses internal rewrites for server-side requests. The backend owns persistence in PostgreSQL, and scheduling/worker processes coordinate job dispatch and execution through the queue.
+**Three queues, not one.** `normal` carries on-demand runs, `scheduled` carries cron
+dispatches, `retry` carries re-runs. Each has its own worker pool, so a cron backlog
+cannot starve a manual trigger, and each scales on its own queue depth.
 
-## Top-Level Structure
+**PgBouncer sits in front of the primary** for the API, workers and autoscaler. The
+scheduler is the one exception and connects directly: its leader election holds a
+*session-level* advisory lock, which PgBouncer's transaction pooling would hand back
+to the pool at commit and silently drop.
 
-```text
-dass/
-  backend/       # FastAPI app, scheduler, worker, autoscaler, models, services
-  frontend/      # Next.js dashboard (placeholder UI, to be implemented)
-  infra/         # LocalStack, PostgreSQL (primary/replica), observability configs
-  scripts/       # load_gen.py (stress), run_integration_tests.sh, e2e_smoke.py
-  docker-compose.yml
-  docker-compose.observability.yml   # Prometheus + Grafana overlay
-  docker-compose.local.yml
-  .env.example
-  README.md
-```
+**Reads go to the replica** unless the session has just written. Read-after-write
+paths pin themselves to the primary so replication lag can never hide a row the same
+request created.
 
-## 啟動方式
-
-DASS 支援兩種 worker 執行模式，依需求選擇其中一種。
+**Every task runs in its own container.** A job's `action_type` and `action_config`
+are compiled into a `runtime_spec` at create/update time, and the worker executes
+that spec without re-interpreting it — as a `docker run` in mode 1, or as a
+Kubernetes Job in mode 2.
 
 ---
 
-### 模式一：純 Docker Compose（本機開發，推薦）
+## Repository layout
 
-所有服務（DB、queue、backend、frontend、worker）都在 Docker Compose 裡，一行指令搞定。Worker 在單一 process 內同時消費 normal / scheduled / retry 三條 queue，手動 `--scale` 控制數量。
+```text
+dass/
+  backend/
+    app/
+      api/            FastAPI routers
+      core/           settings and logging
+      db/             engines, read/write routing session
+      models/         SQLAlchemy models
+      queue/          SQS and in-memory queue clients
+      repositories/   data access
+      scheduler/      cron scheduler and dependency scheduler
+      services/       job, worker, execution, autoscaler, VM services
+    alembic/          migrations
+    tests/            unit tests; tests/integration needs Docker
+  frontend/           Next.js dashboard
+  infra/
+    lib.sh            shared helpers for the scripts below
+    start-mode1.sh    start-mode2.sh    stop-all.sh    down-all.sh
+    start-grafana.sh  stop-grafana.sh   load-test.sh
+    k8s/              namespace, RBAC, deployments, KEDA ScaledObjects
+    observability/    Prometheus, Grafana, exporters
+    postgres/         primary and replica bootstrap
+    traefik/          dynamic config and local PKI
+  scripts/            e2e_smoke.py, load generators, integration test runner
+  docs/               architecture.md and the PlantUML diagrams it embeds
+  docker-compose.yml               base stack
+  docker-compose.local.yml         dev overlay: source mounts, published ports
+  docker-compose.observability.yml Prometheus + Grafana overlay
+```
+
+---
+
+## Mode 1 — everything in Docker Compose
+
+The default. Database, queue, API, scheduler, frontend, worker and autoscaler all run
+as Compose services. One worker process consumes all three queues, with its own
+concurrency budget per queue.
 
 ```bash
 ./infra/start-mode1.sh
 ```
 
-啟動完成後：
-- Frontend：http://localhost:3000
-- API：http://localhost:8000
-- API docs：http://localhost:8000/docs
+The script pre-pulls the job runner images, brings the stack up, waits for the API to
+report healthy, and starts the observability overlay.
 
-手動調整 worker 數量：
+Scale workers by hand:
 
 ```bash
-docker compose up --scale worker=3
+docker compose up -d --scale worker=3
 ```
+
+The `autoscaler` service also adjusts the fleet on its own — see
+[Worker scaling](#worker-scaling).
+
+### Doing it manually
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+               -f docker-compose.observability.yml up -d
+curl http://localhost:8000/health
+# {"status":"ok","service":"dass"}
+```
+
+> Always pass the same set of `-f` files. Compose compares a running container
+> against the config it computes now, so a different combination silently recreates
+> `postgres` and `localstack` — which, on a first run, interrupts initdb partway
+> through the replication setup. `infra/lib.sh` exists to keep that set in one place.
 
 ---
 
-### 模式二：Docker Compose + Kubernetes Worker（KEDA 自動擴縮）
+## Mode 2 — Compose infrastructure with Kubernetes workers
 
-其他服務跑在 Docker Compose，worker 改由 Kubernetes 管理。三條 queue（normal / scheduled / retry）各有一個獨立的 worker Deployment，由 KEDA 根據各自的 queue 深度自動擴縮（1–10 pods，每 20 條訊息對應 1 個 pod）。
+The database, queue, API, scheduler and frontend stay in Compose. Workers move to
+Kubernetes, one Deployment per queue, each scaled independently by its own KEDA
+ScaledObject from that queue's depth. Task containers become Kubernetes Jobs.
 
-**Prerequisites：**
-- Docker
-- [minikube](https://minikube.sigs.k8s.io/docs/start/)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [helm](https://helm.sh/docs/intro/install/)
+**Prerequisites:** Docker, [minikube](https://minikube.sigs.k8s.io/docs/start/),
+[kubectl](https://kubernetes.io/docs/tasks/tools/), [helm](https://helm.sh/docs/intro/install/).
+The script installs the last three automatically on Linux; set
+`DASS_NO_AUTO_INSTALL=1` to install them yourself.
 
 ```bash
 ./infra/start-mode2.sh
 ```
 
-腳本會依序執行以下步驟（也可手動逐步跑）：
+It runs eight steps, each of which you can also run by hand:
 
----
-
-**Step 1：啟動 Docker Compose 基礎服務（不含 worker）**
+**1. Compose infrastructure, without workers**
 
 ```bash
 cp .env.example .env
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d \
-  postgres postgres-replica localstack api-server scheduler frontend
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+               -f docker-compose.observability.yml up -d \
+  traefik-pki traefik postgres postgres-replica pgbouncer localstack \
+  api-server scheduler frontend
+docker compose stop worker autoscaler   # in case mode 1 was running
 ```
 
-等 api-server healthy（約 10–20 秒）：
+**2. Minikube**
 
 ```bash
-curl http://localhost:8000/health
-# 預期：{"status":"ok","service":"dass"}
+minikube start --nodes 2 --driver docker --cpus 2 --memory 2048 --kubernetes-version stable
+kubectl wait --for=condition=Ready nodes --all --timeout=120s
 ```
 
-如果你也有啟動 Traefik，則可以改用公開入口 `https://dass.localhost:8443`；本機憑證鏈會放在 `infra/traefik/pki/rootCA.crt`。`*.localhost` 會自動指向本機，不需要額外設定 `/etc/hosts`。
-
----
-
-**Step 2：啟動 Minikube（2 節點）**
+**3. KEDA and kube-state-metrics**
 
 ```bash
-minikube start \
-  --nodes 2 \
-  --driver docker \
-  --cpus 2 \
-  --memory 2048 \
-  --kubernetes-version stable
-```
-
-確認節點 Ready：
-
-```bash
-kubectl get nodes
-# NAME           STATUS   ROLES           AGE
-# minikube       Ready    control-plane   ...
-# minikube-m02   Ready    <none>          ...
-```
-
----
-
-**Step 3：安裝 KEDA**
-
-```bash
-helm repo add kedacore https://kedacore.github.io/charts 2>/dev/null || true
-helm repo update kedacore
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
 helm upgrade --install keda kedacore/keda \
-  --namespace keda \
-  --create-namespace \
-  --wait \
-  --timeout 3m
+  --namespace keda --create-namespace --wait --timeout 3m
+helm upgrade --install kube-state-metrics prometheus-community/kube-state-metrics \
+  --namespace kube-system --wait --timeout 3m
 ```
 
-確認 KEDA pods 都 Running：
-
-```bash
-kubectl get pods -n keda
-# keda-operator、keda-admission-webhooks、keda-operator-metrics-apiserver 都 1/1 Running
-```
-
----
-
-**Step 4：Build Docker images**
+**4. Build the images**
 
 ```bash
 docker build -t dass-api:local       -f backend/Dockerfile.api       backend/
-docker build -t dass-scheduler:local -f backend/Dockerfile.scheduler  backend/
-docker build -t dass-worker:local    -f backend/Dockerfile.worker     backend/
-```
-
----
-
-**Step 5：Load images 進 minikube（三個平行跑，比較快）**
-
-```bash
-minikube image load dass-api:local       --overwrite=true &
-minikube image load dass-scheduler:local --overwrite=true &
-minikube image load dass-worker:local    --overwrite=true &
-wait
-```
-
-確認 images 已進入 minikube：
-
-```bash
-minikube image ls | grep dass-
-# docker.io/library/dass-api:local
-# docker.io/library/dass-scheduler:local
-# docker.io/library/dass-worker:local
-```
-
----
-
-**Step 6：部署所有 K8s manifests**
-
-```bash
-kubectl apply -f infra/k8s/
-```
-
-等待所有 Deployment 就緒（平行等，約 1–2 分鐘）：
-
-```bash
-kubectl rollout status deployment/dass-api              -n dass --timeout=180s &
-kubectl rollout status deployment/dass-scheduler        -n dass --timeout=120s &
-kubectl rollout status deployment/dass-worker-normal    -n dass --timeout=120s &
-kubectl rollout status deployment/dass-worker-scheduled -n dass --timeout=120s &
-kubectl rollout status deployment/dass-worker-retry     -n dass --timeout=120s &
-wait
-```
-
----
-
-**Step 7：確認所有服務正常**
-
-```bash
-# Docker Compose 服務（api, scheduler, postgres, localstack, frontend 都應該 Up/healthy）
-docker compose ps
-
-# K8s — 三個 worker pool 各自 1/1 Running
-kubectl get pods -n dass | grep worker
-
-# KEDA ScaledObjects 的 READY 欄位應顯示 True
-kubectl get scaledobject -n dass
-
-# API 健康確認
-curl http://localhost:8000/health
-# {"status":"ok","service":"dass"}
-```
-
-**存取前端：**
-
-如果是 VS Code Remote SSH，需要在 VS Code 的 **PORTS** 面板轉發 port 3000 後，才能用本機瀏覽器開 `http://localhost:3000`。
-
-> **注意**：模式二下，job 的 `action_config.url` 若要呼叫本機 API，需使用 `http://host.minikube.internal:8000`，不能用 `http://api-server:8000`（那是 Docker Compose 內部 hostname，K8s pod 無法解析）。
-
----
-
-**關閉服務：**
-
-```bash
-# 停止 Docker Compose 服務（若 observability 也在跑，加上 -f docker-compose.observability.yml）
-docker compose -f docker-compose.yml -f docker-compose.observability.yml down
-
-# 停止 Minikube（保留 cluster 狀態，下次 minikube start 可快速恢復）
-minikube stop
-
-# 完全刪除 Minikube cluster
-minikube delete
-```
-
----
-
-**Minikube 重開後快速恢復（dass namespace 消失但 cluster 還在）：**
-
-```bash
-# 重啟 Docker Compose 基礎服務
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d \
-  postgres postgres-replica localstack api-server scheduler frontend
-
-# 重啟 minikube
-minikube start
-
-# 重裝 KEDA（已裝則自動 upgrade，無副作用）
-helm upgrade --install keda kedacore/keda --namespace keda --create-namespace --wait --timeout 3m
-
-# Rebuild images + reload（若程式碼沒改可略過 build，只做 load）
-docker build -t dass-api:local -f backend/Dockerfile.api backend/
 docker build -t dass-scheduler:local -f backend/Dockerfile.scheduler backend/
-docker build -t dass-worker:local -f backend/Dockerfile.worker backend/
-minikube image load dass-api:local --overwrite=true &
-minikube image load dass-scheduler:local --overwrite=true &
-minikube image load dass-worker:local --overwrite=true &
-wait
-
-# 重新部署
-kubectl apply -f infra/k8s/
+docker build -t dass-worker:local    -f backend/Dockerfile.worker    backend/
 ```
 
----
-
-### 切換 Worker 模式
-
-**從模式二切換到模式一（Docker Compose worker）：**
+**5. Push them into every Minikube node**
 
 ```bash
-# K8s worker 縮到 0（不刪 deployment，之後可以再恢復）
+for image in dass-api:local dass-scheduler:local dass-worker:local alpine:3 curlimages/curl:8.6.0; do
+  for node in $(minikube node list | awk '{print $1}'); do
+    docker save "$image" | minikube ssh -n "$node" --native-ssh=false -- docker load
+  done
+done
+```
+
+> Not `minikube image load`. When the tag already exists on a node it leaves the old
+> image in place, even with `--overwrite=true` — so re-running the script after a code
+> change redeploys the *previous* build and nothing tells you. Piping `docker save`
+> into each node's daemon replaces the tag every time.
+
+**6. Apply the manifests**
+
+```bash
+kubectl apply -f infra/k8s/
+for d in dass-api dass-scheduler dass-worker-normal dass-worker-scheduled dass-worker-retry; do
+  kubectl rollout status deployment/$d -n dass --timeout=180s
+done
+```
+
+**7. Expose kube-state-metrics to the Compose Prometheus**
+
+```bash
+kubectl -n kube-system port-forward --address=0.0.0.0 \
+  service/kube-state-metrics-nodeport 30091:8080
+```
+
+**8. Observability**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+               -f docker-compose.observability.yml up -d \
+  prometheus grafana cadvisor postgres-exporter sqs-exporter
+curl -X POST http://localhost:9090/-/reload
+```
+
+### Checking it
+
+```bash
+docker compose ps                       # Compose services
+kubectl get pods -n dass                # api, scheduler, three worker pools
+kubectl get scaledobject -n dass        # READY should be True for all three
+curl http://localhost:8000/health
+```
+
+> **Job URLs in mode 2.** A job whose `action_config.url` points at this machine must
+> use `http://host.minikube.internal:8000`. `api-server` is a Compose hostname and
+> Kubernetes pods cannot resolve it.
+
+### Switching between modes
+
+The start scripts handle this: `start-mode1.sh` scales the Kubernetes workers to zero,
+and `start-mode2.sh` stops the Compose worker and autoscaler. By hand:
+
+```bash
+# mode 2 -> mode 1
 kubectl scale deployment dass-worker-normal dass-worker-scheduled dass-worker-retry \
   --replicas=0 -n dass
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d worker autoscaler
 
-# 啟動 Docker Compose worker（一個 process 消費全部三條 queue）
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d worker
-```
-
-確認啟動：
-```bash
-docker compose logs worker | grep "started"
-# Worker 'worker-1' started. pools=3, containers_per_pool=2, queues=['normal', 'scheduled', 'retry']
-```
-
-**從模式一切換回模式二（K8s worker）：**
-
-```bash
-# 停 Docker Compose worker
-docker compose stop worker
-
-# 恢復 K8s worker（KEDA 接管 replica 數量）
+# mode 1 -> mode 2
+docker compose stop worker autoscaler
 kubectl scale deployment dass-worker-normal dass-worker-scheduled dass-worker-retry \
   --replicas=1 -n dass
 ```
 
+### After a Minikube restart
+
+```bash
+minikube start
+helm upgrade --install keda kedacore/keda --namespace keda --create-namespace --wait --timeout 3m
+kubectl apply -f infra/k8s/
+```
+
+Rebuild and reload the images too if the code changed (steps 4 and 5). Simply
+re-running `./infra/start-mode2.sh` does all of this.
+
 ---
 
-### 驗證服務與重置
+## Verifying the stack
+
+`scripts/e2e_smoke.py` checks every component and then drives one job through the full
+pipeline: create → trigger → claim → execute → result. It works in both modes and
+needs no third-party packages.
 
 ```bash
-# 健康檢查
-curl http://localhost:8000/health
-# {"status":"ok","service":"dass"}
-
-# 查看 task 統計
-curl http://localhost:8000/metrics
-# {"jobs":0,"tasks":0}
-
-# 填入範例資料
-docker compose exec api-server python scripts/seed.py
-
-# 停止所有 Docker Compose 服務
-docker compose down
-
-# 從頭重建（含清空資料庫）
-docker compose down -v
-docker compose up --build
+python3 scripts/e2e_smoke.py
+python3 scripts/e2e_smoke.py --api http://localhost:8000   # bypass Traefik
+python3 scripts/e2e_smoke.py --insecure                    # skip TLS verification
 ```
 
-## Viewing Logs
+A healthy run ends with `all green — stack is end-to-end healthy`. When something is
+broken it names the stage that failed and where to look.
+
+Quick manual checks:
 
 ```bash
-# All services at once (recommended)
-docker compose logs -f
+curl http://localhost:8000/health    # {"status":"ok","service":"dass"}
+curl http://localhost:8000/metrics   # {"jobs":N,"tasks":N}
+```
 
-# Individual services
-docker compose logs -f traefik
-docker compose logs -f api-server
-docker compose logs -f scheduler
-docker compose logs -f worker
+### Demo and load scripts
+
+Everything in `scripts/` is runnable against a live stack. The generators need `httpx`
+or a database URL, so run them through the backend environment (`cd backend` first, or
+prefix with `uv run --project backend`).
+
+| Script | What it exercises |
+|---|---|
+| `e2e_smoke.py` | Every component, then one job end to end. Start here. |
+| `dag_demo.py` | An A→C, B→C diamond: both upstreams must succeed before C fires, and C fires exactly once. |
+| `load_gen.py` | Bulk create and trigger through the HTTP API — the real queue and worker path. |
+| `sched_gen.py` | Cron jobs, so the scheduler dispatch path and the `scheduled` queue carry load. |
+| `retry_gen.py` | Jobs that always exit non-zero, to drive the retry queue and `final_failed`. |
+| `load_gen_scheduler.py` | Bulk cron jobs written straight to the database, for scheduler-only load. |
+
+```bash
+# Watch a DAG chain itself
+cd backend && DASS_DATABASE_URL=postgresql+psycopg://dass:dass@localhost:5432/dass \
+  DASS_SQS_ENDPOINT_URL=http://localhost:4566 \
+  uv run python ../scripts/dag_demo.py
+
+# Push real load through the API
+./infra/load-test.sh 400
+```
+
+---
+
+## Observing the stack
+
+### Every container at a glance
+
+```bash
+docker compose ps                                   # status and health of each service
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+docker stats                                        # live CPU / memory / IO per container
+docker compose top                                  # processes inside each container
+```
+
+### One service at a time
+
+```bash
+docker compose logs -f                # everything, interleaved
+docker compose logs -f api-server     # HTTP requests, validation errors
+docker compose logs -f scheduler      # leader election, dispatch counts, chaining
+docker compose logs -f worker         # claim, execute, retry decisions
+docker compose logs -f postgres       # slow queries, connection limits
+docker compose logs -f postgres-replica   # replication bootstrap and lag
+docker compose logs -f pgbouncer      # pool saturation
+docker compose logs -f localstack     # SQS
+docker compose logs -f traefik        # routing and TLS
 docker compose logs -f frontend
+docker compose logs --tail 100 worker # last 100 lines instead of following
 ```
 
-To enable verbose logging, edit `.env` and set `DASS_LOG_LEVEL=DEBUG`, then restart:
+Set `DASS_LOG_LEVEL=DEBUG` in `.env` and restart for verbose output.
+
+Inside a container:
 
 ```bash
-docker compose up --build
+docker compose exec api-server sh
+docker compose exec postgres psql -U dass -d dass -c "SELECT status, count(*) FROM tasks GROUP BY status"
+docker compose exec postgres psql -U dass -d dass -c "SELECT client_addr, state, sync_state FROM pg_stat_replication"
 ```
 
-### Common Issues
-
-| Symptom | Likely Cause | Fix |
-|---------|-------------|-----|
-| `connection refused` on port 8000 | API server still starting or crashed | Check `docker compose logs api-server` |
-| API server restarts repeatedly | Database or LocalStack not ready yet | Wait — Docker healthchecks handle ordering. If persistent, run `docker compose down -v && docker compose up --build` |
-| Frontend shows blank page | Frontend container still building | Check `docker compose logs frontend` — Next.js build takes a moment |
-| K8s Job `curl: (6) Could not resolve host: api-server` | `api-server` 是 Docker Compose hostname，K8s pod 無法解析 | job 的 `action_config.url` 改用 `http://host.minikube.internal:8000` |
-| cAdvisor 一直 restart（`inotify_init: too many open files`） | OS inotify instances 上限太低（預設 128） | `sudo sysctl fs.inotify.max_user_instances=8192` 後重啟 cadvisor |
-| K8s worker pod 起來後馬上 CrashLoopBackOff | `DASS_*` env var 被 K8s service env var 覆蓋（`tcp://...` 格式） | 確認 `07-worker.yaml` 的 pod spec 有 `enableServiceLinks: false` |
-
-## Database Migrations
-
-Migrations run automatically when the API server starts (`entrypoint.sh` runs `alembic upgrade head`). To run manually:
+### Mode 2: the Kubernetes side
 
 ```bash
-docker compose exec api-server alembic upgrade head
+kubectl get pods -n dass -o wide                     # which node each pod is on
+kubectl logs -n dass -l app=dass-worker-normal -f    # follow a whole worker pool
+kubectl logs -n dass -l app=dass-scheduler --tail=100
+kubectl describe pod -n dass <pod>                   # events: pulls, probes, evictions
+kubectl top pods -n dass                             # needs metrics-server
+kubectl get jobs -n dass                             # the per-task Jobs workers create
+kubectl get scaledobject,hpa -n dass                 # KEDA's view of queue depth
+watch -n3 'kubectl get pods -n dass | grep worker'   # scaling in real time
 ```
 
-## Worker Scaling
+### Grafana
 
-**Docker Compose 模式：** 手動指定 worker 數量
+http://localhost:3001 — anonymous admin is enabled, so no login. Two dashboards:
+
+- **DASS · Overview** (`/d/dass-overview`) — the Compose stack. Job and task counts,
+  tasks pending and running per logical queue, task outcomes (enqueued, succeeded,
+  failed runs, retries, final failures), scheduler dispatch rate, plus per-container
+  CPU and memory from cAdvisor and connection and throughput stats from
+  postgres-exporter.
+- **DASS · Kubernetes** (`/d/dass-k8s`) — mode 2. Worker pod count per queue, KEDA's
+  computed target, and SQS visible versus in-flight messages per queue.
+
+The pending/running panels are read from the database rather than from SQS on purpose:
+a task is usually consumed within one scrape interval, so the SQS gauge reads zero and
+hides the real load.
+
+To watch a load test: start the observability overlay, open **DASS · Overview**, then
+run `./infra/load-test.sh 400` and watch queue depth rise and drain.
+
+### Prometheus and cAdvisor
 
 ```bash
-docker compose up --scale worker=3
+# Are all scrape targets healthy?
+curl -s http://localhost:9090/api/v1/targets | python3 -c "
+import sys, json
+for t in json.load(sys.stdin)['data']['activeTargets']:
+    print(t['labels']['job'], '-', t['health'])
+"
 ```
 
-**Kubernetes 模式（KEDA）：** 三條 queue 各有獨立的 Deployment，KEDA 各自根據 queue 深度自動擴縮（範圍 1–10 pods，每 20 條訊息 = 1 pod，scale-down 有 60 秒 cooldown）：
+Expect `prometheus`, `cadvisor`, `postgres` and `sqs` to be up. The `kubernetes`
+target is down whenever Minikube is not running, which is normal in mode 1.
+
+Raw per-container metrics are at http://localhost:8081 (cAdvisor) and the query UI at
+http://localhost:9090.
+
+---
+
+## Working with jobs
+
+Create a one-time job — no cron, so it runs as soon as it is created:
 
 ```bash
-# 查看三個 worker pool 的 scaling 狀態
-kubectl get scaledobject -n dass
-kubectl get hpa -n dass
-
-# 觀察 Pod 數量即時變化
-watch -n5 'kubectl get pods -n dass | grep worker'
+curl -X POST http://localhost:8000/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"hello","action_type":"shell",
+       "action_config":{"command":"echo hi","timeout_seconds":30}}'
 ```
 
-## Autoscaling
+Create a cron job — the scheduler owns it from then on:
 
-**Kubernetes 模式** 使用 KEDA（Kubernetes Event-Driven Autoscaler）作為唯一的 autoscaling 機制。每條 queue 有獨立的 ScaledObject，互不干擾：
+```bash
+curl -X POST http://localhost:8000/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"every-minute","cron_expression":"* * * * *","action_type":"shell",
+       "action_config":{"command":"echo tick","timeout_seconds":30}}'
+```
 
-| ScaledObject | 目標 Deployment | Queue |
+Chain jobs into a DAG with `upstream_job_ids` / `downstream_job_ids`. A downstream job
+runs once **all** of its upstreams have succeeded, and exactly once per generation of
+upstream completions. Cycles are rejected at create and update time.
+
+`scripts/dag_demo.py` builds a small A→C, B→C diamond and watches the chain fire.
+
+### API
+
+| Method | Path | Description |
 |---|---|---|
-| `dass-worker-normal` | `dass-worker-normal` | `dass-tasks-normal` |
-| `dass-worker-scheduled` | `dass-worker-scheduled` | `dass-tasks-scheduled` |
-| `dass-worker-retry` | `dass-worker-retry` | `dass-tasks-retry` |
+| `POST` | `/api/v1/jobs` | Create a job |
+| `GET` | `/api/v1/jobs` | List jobs — paged and filterable (`page`, `page_size`, `enabled`, `action_type`, `concurrency_policy`, `q`) |
+| `GET` | `/api/v1/jobs/{id}` | Get one job |
+| `PUT` | `/api/v1/jobs/{id}` | Update a job |
+| `DELETE` | `/api/v1/jobs/{id}` | Delete a job |
+| `POST` | `/api/v1/jobs/{id}/trigger` | Run a job now |
+| `GET` | `/api/v1/jobs/{id}/tasks` | Run history for a job |
+| `GET` | `/api/v1/tasks/{id}` | One task, with stdout and stderr |
+| `POST` | `/api/v1/tasks/{id}/retry` | Re-run a failed task |
+| `GET` | `/health` | Liveness, including a database round trip |
+| `GET` | `/metrics` | Job and task counts (JSON, not Prometheus format) |
+| `POST` | `/vms` | Start worker containers by hand — **disabled by default** |
 
-公式：`desired_pods = ceil(queue_depth / 20)`，範圍 `[1, 10]`。
+Interactive documentation lives at http://localhost:8000/docs and
+https://dass.localhost:8443/docs.
 
-**Docker Compose 模式** 有一個 `autoscaler` container（`autoscaler_service.py`），透過 Docker daemon API 動態新增/移除 worker container。若壓測後留下殘餘 worker：
+> **This API has no authentication.** Combined with `action_type: "shell"`, anyone who
+> can reach port 8000 can run arbitrary commands in a container on this host. Keep it
+> on a trusted network, and set `DASS_SHELL_EXECUTION_ENABLED=false` to reject new
+> shell jobs anywhere that is not your own machine. `POST /vms` is gated separately
+> behind `DASS_VM_ADMIN_API_ENABLED` because it starts containers through the host
+> Docker socket.
+
+---
+
+## Worker scaling
+
+**Mode 1** — the `autoscaler` service reads the total depth of all three queues
+(waiting plus in-flight) and sizes the worker fleet at
+`ceil(depth / 20)`, clamped to `[1, 10]`. It clones the baseline worker container and
+labels the copies `com.dass.autoscaled=true`, so scale-down never touches the
+original. If a load test leaves strays behind:
 
 ```bash
 docker ps -q --filter "label=com.dass.autoscaled=true" | xargs -r docker kill
 ```
 
-## Observability (Prometheus + Grafana)
+**Mode 2** — KEDA owns scaling and the autoscaler service disables itself. Each queue
+has its own ScaledObject targeting its own Deployment:
 
-The metrics stack (Prometheus, Grafana, cAdvisor, postgres-exporter, custom sqs-exporter) lives in a separate overlay so the dev stack stays lean — bring it up only when you want to watch a load test:
+| ScaledObject | Deployment | Queue |
+|---|---|---|
+| `dass-worker-normal` | `dass-worker-normal` | `dass-tasks-normal` |
+| `dass-worker-scheduled` | `dass-worker-scheduled` | `dass-tasks-scheduled` |
+| `dass-worker-retry` | `dass-worker-retry` | `dass-tasks-retry` |
+
+`desired = ceil(queue_depth / 20)`, clamped to `[1, 3]`. The ceiling is 3 rather than
+10 because each worker pod also creates job pods; three queues at three workers with
+two concurrent tasks each is already 18 job pods on a two-node Minikube. Raise it
+alongside the node count, not on its own.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+kubectl get scaledobject -n dass
+kubectl get hpa -n dass
+watch -n3 'kubectl get pods -n dass | grep worker'
 ```
 
-| Tool | URL | Notes |
-|------|-----|-------|
-| Grafana | http://localhost:3001 | Dashboard **DASS · Overview** at `/d/dass-overview`; anonymous admin (dev only) |
-| Prometheus | http://localhost:9090 | Raw metrics + query UI |
-| cAdvisor | http://localhost:8081 | Per-container CPU / memory |
+---
 
-> **cAdvisor 前置條件：** cAdvisor 需要較高的 inotify 限制才能啟動。若 cAdvisor 一直 restart（`inotify_init: too many open files`），執行一次以下指令後再重啟：
-> ```bash
-> sudo sysctl fs.inotify.max_user_instances=8192
-> sudo sysctl fs.inotify.max_user_watches=524288
-> docker compose -f docker-compose.yml -f docker-compose.observability.yml restart cadvisor
-> ```
+## Load and stress testing
 
-確認 Prometheus 所有 scrape targets 正常：
+Start the observability overlay first so you can watch queue depth, worker throughput
+and database pressure while the test runs.
 
 ```bash
-curl -s http://localhost:9090/api/v1/targets | python3 -c "
-import sys,json; d=json.load(sys.stdin)
-for t in d['data']['activeTargets']:
-    print(t['labels']['job'], '-', t['health'])
-"
-# cadvisor - up
-# postgres - up
-# prometheus - up
-# sqs - up
+./infra/load-test.sh 400
 ```
 
-Tear it down, including the metrics volumes:
+That wraps `scripts/load_gen.py`, which drives the full HTTP → API → database → queue
+path rather than writing to the database directly, so queue depth and worker behaviour
+are real. For finer control:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml down -v
-```
-
-## Load / Stress Testing
-
-先啟動 observability overlay，再執行壓測，這樣可以在 Grafana `http://localhost:3001/d/dass-overview` 即時觀察 queue depth、worker throughput、DB 壓力。
-
-`scripts/load_gen.py` 走完整的 HTTP → API → DB → queue 路徑（非直接寫 DB），queue depth 和 worker 反應都是真實的：
-
-```bash
-# 先啟動 observability
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
-
-# 執行壓測（從 backend/ 目錄執行，確保使用 .venv 裡的 httpx）
 cd backend
-.venv/bin/python ../scripts/load_gen.py --count 1000 --concurrency 32 --trigger
+uv run python ../scripts/load_gen.py --count 1000 --concurrency 64 --trigger
 ```
 
 | Flag | Meaning |
-|------|---------|
-| `--count N` | number of jobs to create (default 1000) |
+|---|---|
+| `--count N` | jobs to create (default 1000) |
 | `--concurrency N` | parallel in-flight HTTP requests (default 32) |
 | `--trigger` | after creating, fire each job once via `/trigger` |
 | `--api URL` | API base URL (default `https://dass.localhost:8443`) |
+| `--insecure` | skip TLS verification |
 
-`load_test.sh` 會沿用這個預設值；如果你只啟動了純 Docker Compose 的 API，而沒有 Traefik，請加上 `--api http://localhost:8000` 自行覆蓋。
+Watch the effect on **DASS · Overview**, or in mode 2 on **DASS · Kubernetes**
+alongside `watch -n3 'kubectl get pods -n dass | grep worker'`. The other generators
+in [Demo and load scripts](#demo-and-load-scripts) put load on specific paths — the
+scheduler, or the retry queue.
 
-**Kubernetes 模式下觀察 KEDA 擴縮：**
+### Resetting between runs
 
 ```bash
-# 另開一個 terminal 持續觀察 worker pod 數量
-watch -n3 'kubectl get pods -n dass | grep worker'
+docker compose stop                  # pause, keep everything
+./infra/stop-all.sh                  # stop the stack and Minikube, keep the data
+./infra/down-all.sh                  # stop and delete every volume
+docker compose up -d --build         # rebuild images after a dependency change
 
-# 查看 HPA 目前 metric 值
-kubectl get hpa -n dass
+# Clear generated jobs and tasks without a full teardown
+docker compose exec postgres psql -U dass -d dass -c "TRUNCATE tasks, job_dependencies, jobs CASCADE"
+
+# Drop autoscaled workers a load test left behind (mode 1)
+docker ps -q --filter "label=com.dass.autoscaled=true" | xargs -r docker kill
 ```
+
+---
+
+## The observability overlay
+
+Prometheus, Grafana, cAdvisor, postgres-exporter and the SQS exporter live in
+`docker-compose.observability.yml` so the dev stack stays lean. Both start scripts
+bring it up; on its own:
+
+```bash
+./infra/start-grafana.sh    # start Prometheus + Grafana + exporters
+./infra/stop-grafana.sh     # stop them, leave the rest running
+```
+
+Reading these dashboards is covered in [Observing the stack](#observing-the-stack).
+
+> **cAdvisor needs a raised inotify limit** on Linux. If it restarts in a loop with
+> `inotify_init: too many open files`:
+> ```bash
+> sudo sysctl fs.inotify.max_user_instances=8192
+> sudo sysctl fs.inotify.max_user_watches=524288
+> ```
+
+---
 
 ## Testing
 
 ### Unit tests
 
-Unit tests use an in-memory SQLite database and a memory queue — **no Docker, no PostgreSQL, no env setup**. The `tests/integration` directory is auto-excluded via `pyproject.toml`.
+SQLite and an in-memory queue — no Docker, no environment setup. `tests/integration`
+is excluded automatically.
 
 ```bash
 cd backend
-uv run pytest            # or: .venv/bin/pytest
+uv sync --extra dev
+uv run pytest
 ```
 
 ### Integration tests
 
-Integration tests need real PostgreSQL + LocalStack. `scripts/run_integration_tests.sh` side-cars two throwaway Postgres containers (`dass_test` on :5432, `dass_scheduler` on :5433), runs migrations, and reuses the compose stack's LocalStack on :4566. Each test runs inside a transaction that is rolled back, so DB state stays clean between runs.
+Real PostgreSQL and LocalStack. The runner starts throwaway containers on their own
+ports (55432 and 14566) so it can coexist with a running dev stack, applies the
+migrations, and runs the suite.
 
 ```bash
-# LocalStack must be reachable first
-docker compose up -d localstack
-
-scripts/run_integration_tests.sh                 # bring up test DBs (if needed) + run pytest
-scripts/run_integration_tests.sh up              # bring up + migrate only, skip pytest
-scripts/run_integration_tests.sh down            # tear down the test DBs
-scripts/run_integration_tests.sh test -k retry   # extra args pass through to pytest
+scripts/run_integration_tests.sh                # start containers, migrate, run
+scripts/run_integration_tests.sh up             # start and migrate only
+scripts/run_integration_tests.sh down           # remove the test containers
+scripts/run_integration_tests.sh test -k retry  # extra arguments go to pytest
 ```
 
-Test containers stay running between invocations for fast iteration — run `... down` when you're finished.
+Containers stay up between runs for fast iteration; use `down` when you are finished.
+The run also writes `backend/test-reports/integration.html`.
 
-### Running CI workflows locally (`act`)
-
-CI runs two workflows: `backend-ci.yml` (unit tests, no Docker) and `integration-ci.yml` (integration tests, real Postgres + LocalStack). You can reproduce them locally with [`act`](https://nektosact.com). The repo's `.actrc` and `.actignore` are auto-loaded — they point `--env-file` at `/dev/null` so your local `.env` can't shadow the workflow's own `env:` block. Since `.actrc` pins no runner image, pass one with `-P`.
-
-**Unit workflow** — no service containers, so it runs anytime (even with the dev stack up). Its jobs are gated by PR-title tags, so feed a fake event whose title contains `[all]` to trigger them all:
+### Frontend
 
 ```bash
-echo '{"pull_request": {"title": "[all] local ci"}}' > /tmp/pr-event.json
+cd frontend
+npm ci
+npm run typecheck     # tsc --noEmit
+npm run format:check  # prettier
+npm test              # vitest
+npm run build         # catches what tsc alone does not
+```
 
-act pull_request \
-  -W .github/workflows/backend-ci.yml \
-  -e /tmp/pr-event.json \
+### CI
+
+| Workflow | Trigger | What it runs |
+|---|---|---|
+| `backend-ci.yml` | `backend/**` | the whole unit suite |
+| `frontend-ci.yml` | `frontend/**` | typecheck, format check, vitest, production build |
+| `integration-ci.yml` | every PR | integration suite against real services |
+
+You can reproduce the workflows locally with [`act`](https://nektosact.com). `.actrc`
+and `.actignore` are picked up automatically and point `--env-file` at `/dev/null`, so
+your local `.env` cannot shadow a workflow's own `env:` block. No runner image is
+pinned, so pass one with `-P`.
+
+```bash
+act pull_request -W .github/workflows/backend-ci.yml \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest
 ```
 
-**Integration workflow** — `act` uses your host Docker daemon, and this workflow publishes a LocalStack service container on host port **4566**, which the dev stack's own LocalStack already owns. Bring the dev stack down first to free the port (and avoid `act` grabbing the wrong LocalStack container), then restore it afterward:
+The integration workflow publishes a LocalStack container on host port 4566, which the
+dev stack already owns. Bring the dev stack down first:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml down
-
-act workflow_dispatch \
-  -W .github/workflows/integration-ci.yml \
+./infra/stop-all.sh
+act workflow_dispatch -W .github/workflows/integration-ci.yml \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest
-
-# bring the dev stack back up when done
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 ```
 
-`workflow_dispatch` is used so the run isn't gated by a PR title. The integration tests run in the **Run integration tests** step — that's where pass/xfail/fail shows up.
+> The final **Upload test results** step fails under `act` with
+> `Unable to get the ACTIONS_RUNTIME_TOKEN env variable`. That is harmless — artifact
+> upload needs a GitHub-hosted service and the tests have already run. Add
+> `--artifact-server-path /tmp/act-artifacts` to silence it.
 
-> The final **Upload test results** step (`actions/upload-artifact@v4`) fails under `act` with `Unable to get the ACTIONS_RUNTIME_TOKEN env variable`. This is harmless — artifact upload needs the GitHub-hosted artifact service, which `act` doesn't provide by default; your tests have already run by then. To silence it, add `--artifact-server-path /tmp/act-artifacts` to the `act` command.
+---
 
-> If you only want to *run* the integration tests (not exercise the workflow YAML), `scripts/run_integration_tests.sh` is simpler — it coexists with the running dev stack and reuses its LocalStack, so no port juggling.
+## Database migrations
 
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/jobs` | Create a job |
-| `GET` | `/api/v1/jobs` | List all jobs |
-| `GET` | `/api/v1/jobs/{id}` | Get a single job |
-| `PUT` | `/api/v1/jobs/{id}` | Update a job |
-| `DELETE` | `/api/v1/jobs/{id}` | Delete a job |
-| `POST` | `/api/v1/jobs/{id}/trigger` | Manually trigger a job |
-| `GET` | `/api/v1/jobs/{id}/tasks` | List tasks for a job |
-| `POST` | `/api/v1/tasks/{id}/retry` | Retry a failed task |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Job and task counts |
-
-Interactive API documentation is available at `https://dass.localhost:8443/docs` when the stack is running.
-
-To trust the local CA on macOS, open `infra/traefik/pki/rootCA.crt` and add it to your login keychain as a trusted root certificate.
-
-### Load Balancing the API
-
-Traefik can distribute traffic across multiple `api-server` replicas. After the stack is up, scale the API service and Traefik will spread requests across the running containers:
+Migrations run automatically when the API server starts (`entrypoint.sh` calls
+`alembic upgrade head`). Concurrent starters are serialised on a PostgreSQL advisory
+lock, so scaling the API to several replicas upgrades the schema exactly once.
 
 ```bash
-docker compose up -d --scale api-server=3
+docker compose exec api-server alembic upgrade head   # run by hand
+cd backend && uv run alembic revision -m "add something"
 ```
 
-Keep the frontend at a single replica unless you also want to scale it intentionally; the public entrypoint remains `https://dass.localhost:8443`.
+---
 
-For a real public deployment, replace the internal CA with Traefik ACME/Let’s Encrypt and a real DNS name. The compose setup here is meant for local and lab environments where you want production-style TLS semantics without public certificate issuance.
+## Development workflow
 
-## Development Workflow (Optional)
+`docker-compose.local.yml` mounts `backend/` into the containers, so backend changes
+take effect without rebuilding. Both start scripts already include it.
 
-If you want **hot reload** for backend code while all infrastructure (DB, LocalStack) stays in Docker, use the local override file:
+The frontend deliberately runs its production build even in the dev overlay: Next.js
+dev mode inside a container needs more inotify watches than most hosts allow. For
+frontend hot reload, run it on the host instead:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+docker compose up -d postgres postgres-replica pgbouncer localstack api-server scheduler worker
+cd frontend && npm install && npm run dev
 ```
 
-This mounts `backend/` source into the containers so code changes take effect immediately without rebuilding images.
-
-> **Frontend note：** `docker-compose.local.yml` 的 frontend dev mode (Next.js dev server) 在 container 環境裡會遇到 OS inotify watch 數量不足的限制。目前預設走 production build。如需前端 hot reload，建議在 host 直接執行（見下方）。
-
-### Running Backend or Frontend Outside Docker
-
-If you prefer to run the backend or frontend directly on your host (e.g. for debugger support), you can stop the corresponding Docker service and run it locally instead. **You still need the Docker services for PostgreSQL and LocalStack.**
+To run the backend on the host as well (for a debugger, say):
 
 ```bash
-# Keep infra running
-docker compose up postgres localstack -d
+docker compose up -d postgres postgres-replica localstack
 
-# Backend (from backend/)
 cd backend
 uv sync --extra dev
 DASS_DATABASE_URL=postgresql+psycopg://dass:dass@localhost:5432/dass \
 DASS_SQS_ENDPOINT_URL=http://localhost:4566 \
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Frontend (from frontend/)
-cd frontend
-npm install
-npm run dev
 ```
 
-Note: when running outside Docker, the database URL must use `localhost` instead of `postgres`, and the SQS endpoint must use `localhost` instead of `localstack`.
+Outside Docker the hostnames change: `localhost` instead of `postgres` and
+`localstack`. `DASS_REPLICA_DATABASE_URL` is left unset above because the replica does
+not publish a host port, so reads fall back to the primary — and the database layer
+then reuses a single engine rather than opening a second pool to the same server. To
+exercise the read/write split, publish `postgres-replica` on 5433 and point the
+variable at it.
 
-Note: this minimal setup skips `postgres-replica`. With `DASS_REPLICA_DATABASE_URL` unset, the backend falls back to the primary DB for read paths, so read/write split behaviour is not exercised. If you need to test it, also start `postgres-replica` and set `DASS_REPLICA_DATABASE_URL` to point at it.
+### Configuration
 
-## Notes
+Every setting is an environment variable with a `DASS_` prefix; see `.env.example`.
+Two are deliberately left unset there, because `env_file` would apply them to every
+service at once and break the per-service split:
 
-- PostgreSQL is the source of truth.
-- SQS is used only as a delivery mechanism.
-- The Next.js frontend proxies API requests to the backend through rewrites, so the browser stays on one origin and avoids CORS issues.
-- The scheduler runs every `DASS_SCHEDULER_INTERVAL_SECONDS` (default `5`) and is responsible for deciding when work should be dispatched.
-- Each task executes inside an ephemeral Docker container spawned by the worker via the host Docker daemon; the job's `runtime_spec` (derived from `action_type` + `action_config`) decides image and command. Both `http` and `shell` action types compile down to this container model.
-- Workers claim tasks atomically and report results back to PostgreSQL.
-- The autoscaler watches queue depth and spawns/reaps extra workers — see the Autoscaling section above.
-- Shell execution is supported for local and internal use, but it is dangerous in production and should be restricted carefully.
+- `DASS_DATABASE_URL` — Compose points the API, worker and autoscaler at PgBouncer and
+  the scheduler at PostgreSQL directly.
+- `DASS_WORKER_ID` — identifies each process, and the database layer sizes its
+  connection pool from it.
+
+### Load balancing the API
+
+Traefik spreads traffic across every `api-server` replica:
+
+```bash
+docker compose up -d --scale api-server=3
+```
+
+Keep the frontend at one replica unless you mean to scale it. For a real deployment,
+replace the internal CA with Traefik's ACME/Let's Encrypt support and a real DNS name;
+the setup here gives production-style TLS semantics without public certificate issuance.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `connection refused` on port 8000 | API still starting, or crashed | `docker compose logs api-server` |
+| API restarts in a loop | Database or LocalStack not ready | Wait — healthchecks handle ordering. If it persists: `./infra/down-all.sh && ./infra/start-mode1.sh` |
+| `postgres-replica` restarting with `no pg_hba.conf entry for replication` | The primary's init script did not run, so the replication role is missing | The volume is half-initialised: `./infra/down-all.sh` and start again |
+| The first job fails with `Container execution timed out` | A cold image pull outlasted the job's own timeout | The start scripts pre-pull the runner images; otherwise `docker pull alpine:3 curlimages/curl:8.6.0` |
+| `certificate verify failed` against `dass.localhost:8443` | Stale local CA | `rm infra/traefik/pki/*.crt infra/traefik/pki/*.key` and restart, or use `--insecure` |
+| A code change does not show up in mode 2 | `minikube image load` kept the old image | Use the `docker save \| minikube ssh -- docker load` loop in step 5 |
+| Kubernetes Job: `Could not resolve host: api-server` | Compose hostnames are invisible to pods | Use `http://host.minikube.internal:8000` in `action_config.url` |
+| Worker pods `CrashLoopBackOff` right after starting | Kubernetes service-discovery env vars overwrote a `DASS_*` variable | Confirm the pod spec has `enableServiceLinks: false` |
+| Worker pods stuck `Pending` | The nodes cannot fit the requested resources | Lower `maxReplicaCount` in `infra/k8s/09-keda-scaledobject.yaml`, or give Minikube more memory |
+| cAdvisor restarting with `inotify_init: too many open files` | The host's inotify limit is too low | See [the observability overlay](#the-observability-overlay) |
+
+---
+
+## Design notes
+
+- **PostgreSQL is the source of truth.** SQS is only a delivery mechanism; losing a
+  message costs a delay, not a record.
+- **Workers claim tasks atomically** with a conditional `UPDATE ... WHERE
+  status = 'pending'`, so two workers can never run the same task.
+- **A short visibility timeout with a heartbeat.** While a task runs, its worker
+  extends the database lock and the queue message visibility together, so a crashed
+  worker loses both at once: the message reappears and the scheduler can reclaim the
+  row within one window, however long the job was.
+- **The scheduler elects a leader** with a PostgreSQL advisory lock. Leadership is
+  tied to the connection, so a dead leader releases it automatically and a standby
+  takes over on its next attempt.
+- **The scheduler keeps a heap** of upcoming firings, refreshed incrementally.
+  Superseded entries are not removed but recognised and skipped on pop, which keeps
+  each sync cheap.
+- **Shell execution is supported** for local and internal use. It is dangerous on any
+  reachable deployment; see the warning under [API](#api).

@@ -1,5 +1,9 @@
-# Three ScaledObjects — one per queue, each targeting its own Deployment.
-# Each scales independently: desired = ceil(queue_depth / 20), clamped to [1, 10].
+# One ScaledObject per queue, each targeting its own Deployment.
+# desired = ceil(queue_depth / 20), clamped to [1, 3].
+#
+# The ceiling is 3 rather than 10 because every worker pod also creates job pods:
+# 3 queues x 3 workers x 2 concurrent tasks is already 18 job pods on a two-node
+# minikube. Raise it alongside the node count, not on its own.
 
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -10,7 +14,7 @@ spec:
   scaleTargetRef:
     name: dass-worker-normal
   minReplicaCount: 1
-  maxReplicaCount: 10
+  maxReplicaCount: 3
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:
@@ -34,7 +38,7 @@ spec:
   scaleTargetRef:
     name: dass-worker-scheduled
   minReplicaCount: 1
-  maxReplicaCount: 10
+  maxReplicaCount: 3
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:
@@ -58,7 +62,7 @@ spec:
   scaleTargetRef:
     name: dass-worker-retry
   minReplicaCount: 1
-  maxReplicaCount: 10
+  maxReplicaCount: 3
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:

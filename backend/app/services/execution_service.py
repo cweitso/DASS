@@ -10,12 +10,17 @@ _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 @dataclass
 class ContainerSpec:
+    """What to run for one task, in a form both execution backends understand."""
+
     image: str
     command: list[str] | None = None
     env: dict[str, str] = field(default_factory=dict)
     timeout_seconds: int = 300
-    cpu: float | None = None
-    memory_mb: int | None = None
+    # Defaults, not "unlimited": an unbounded job container starves its neighbours
+    # on Docker and is unschedulable-by-guesswork on Kubernetes. Jobs that need more
+    # can override both in their runtime_spec.
+    cpu: float | None = 0.5
+    memory_mb: int | None = 256
     working_dir: str | None = None
 
 
@@ -32,7 +37,7 @@ class ExecutionService:
         self.network = network
 
     def _build_docker_cmd(self, spec: ContainerSpec) -> list[str] | None:
-        """Build docker run command list. Returns None if env key validation fails."""
+        """Assemble the docker run argv, or None if an env key is not a valid name."""
         docker_cmd = ["docker", "run", "--rm"]
         if self.network:
             docker_cmd.extend(["--network", self.network])

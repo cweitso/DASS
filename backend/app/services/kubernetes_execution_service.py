@@ -139,6 +139,22 @@ class KubernetesExecutionService:
             stderr=f"Container execution timed out after {spec.timeout_seconds}s",
         )
 
+    def _read_pod_log(self, pod_name: str) -> str:
+        """Read a pod's log as text.
+
+        _preload_content=False on purpose. With the default, the client hands the
+        raw body to str(), so a bytes body is stored as its repr ("b'hello\\n'")
+        and the same job produces different output on the Kubernetes backend than
+        on the Docker one.
+        """
+        response = self._core_v1.read_namespaced_pod_log(
+            pod_name, self.namespace, container="job", _preload_content=False
+        )
+        data = getattr(response, "data", response)
+        if isinstance(data, bytes):
+            return data.decode(errors="replace")
+        return data or ""
+
     def _get_pod_logs(self, job_name: str) -> tuple[str, str]:
         try:
             pods = self._core_v1.list_namespaced_pod(
@@ -148,12 +164,10 @@ class KubernetesExecutionService:
             if not pods.items:
                 return "", ""
             pod_name = pods.items[0].metadata.name
-            logs = self._core_v1.read_namespaced_pod_log(
-                pod_name, self.namespace, container="job"
-            )
-            # K8s 的 pod log 是 stdout+stderr 合併後的單一串流,API 無法分離兩者。
-            # 因此把整段 log 當成 stdout 回傳、stderr 留空——這是 K8s 後端的先天限制,
-            # 不是漏接 stderr。Docker 後端(subprocess)才有分離的 stdout/stderr。
+            logs = self._read_pod_log(pod_name)
+            # Kubernetes merges stdout and stderr into one pod log stream and the API
+            # cannot separate them, so the whole log is reported as stdout. The Docker
+            # backend keeps them apart because subprocess does.
             return logs or "", ""
         except Exception:
             logger.exception("Failed to get pod logs for job=%s", job_name)

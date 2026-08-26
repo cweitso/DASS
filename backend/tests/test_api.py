@@ -46,7 +46,7 @@ def test_create_job_without_cron_becomes_one_time_job(client, db_session):
 
     task = db_session.query(Task).filter_by(job_id=job.id).one()
     assert task.status == "pending"
-    # 建立即執行的隨需觸發 → manual（scheduler 沒參與，不可標 scheduled）。
+    # Created-and-run is an on-demand trigger, so it is manual, not scheduled.
     assert task.trigger_type == "manual"
 
     messages = client.app.state.normal_queue_client.receive_tasks(max_messages=1, wait_time_seconds=0)
@@ -207,7 +207,7 @@ def test_enabling_disabled_one_time_job_triggers_it(client, db_session):
     tasks = db_session.query(Task).filter_by(job_id=job.id).all()
     assert len(tasks) == 1
     assert tasks[0].status == "pending"
-    assert tasks[0].trigger_type == "scheduled"
+    assert tasks[0].trigger_type == "manual"
 
     messages = client.app.state.normal_queue_client.receive_tasks(max_messages=1, wait_time_seconds=0)
     assert len(messages) == 1
@@ -253,7 +253,7 @@ def test_get_task_details(client, db_session):
 
 
 def test_circular_dependency_is_rejected(client):
-    # 1. 建立 Job A
+    # Job A
     resp_a = client.post(
         "/api/v1/jobs",
         json={
@@ -268,7 +268,7 @@ def test_circular_dependency_is_rejected(client):
     assert resp_a.status_code == 200
     job_a_id = resp_a.json()["id"]
 
-    # 2. 建立 Job B (上游是 A)
+    # Job B, downstream of A
     resp_b = client.post(
         "/api/v1/jobs",
         json={
@@ -284,7 +284,7 @@ def test_circular_dependency_is_rejected(client):
     assert resp_b.status_code == 200
     job_b_id = resp_b.json()["id"]
 
-    # 3. 建立 Job C (上游是 B)
+    # Job C, downstream of B
     resp_c = client.post(
         "/api/v1/jobs",
         json={
@@ -300,9 +300,9 @@ def test_circular_dependency_is_rejected(client):
     assert resp_c.status_code == 200
     job_c_id = resp_c.json()["id"]
 
-    # 目前圖形為: A -> B -> C
+    # The graph is now A -> B -> C.
     
-    # 測試 1: 試圖讓 A 依賴 C (C -> A)，形成 A -> B -> C -> A
+    # Adding C -> A would close the loop A -> B -> C -> A.
     resp_cycle_1 = client.put(
         f"/api/v1/jobs/{job_a_id}",
         json={"upstream_job_ids": [job_c_id]},
@@ -310,7 +310,7 @@ def test_circular_dependency_is_rejected(client):
     assert resp_cycle_1.status_code == 422
     assert "Circular dependency detected" in resp_cycle_1.json()["detail"]
 
-    # 測試 2: 試圖讓 C 觸發 A (C -> A)，形成 A -> B -> C -> A
+    # Same cycle, expressed from C's side.
     resp_cycle_2 = client.put(
         f"/api/v1/jobs/{job_c_id}",
         json={"downstream_job_ids": [job_a_id]},
@@ -318,7 +318,7 @@ def test_circular_dependency_is_rejected(client):
     assert resp_cycle_2.status_code == 422
     assert "Circular dependency detected" in resp_cycle_2.json()["detail"]
 
-    # 測試 3: 試圖在建立新 Job D 的瞬間就自我形成迴圈 (A -> D -> A)
+    # A cycle created in a single request: A -> D -> A.
     resp_cycle_3 = client.post(
         "/api/v1/jobs",
         json={

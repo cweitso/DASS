@@ -8,7 +8,7 @@ from app.db.session import SessionLocal
 
 
 def main():
-    print("準備建立 500 個高頻測試 Job...")
+    print("Creating 500 high-frequency test jobs...")
     jobs_data = []
     now = datetime.now(UTC)
     run_id = uuid.uuid4().hex[:6]
@@ -18,9 +18,9 @@ def main():
             {
                 "id": uuid.uuid4().hex,
                 "name": f"stress-test-{run_id}-{i}",
-                "cron_expression": "* * * * *",  # 5 個星號代表每分鐘一次
+                "cron_expression": "* * * * *",  # every minute
                 "next_fire_at": now
-                + timedelta(seconds=i * 30),  # 每個 Job 延遲 30 秒觸發
+                + timedelta(seconds=i * 30),  # stagger first fire by 30s per job
                 "action_type": "shell",
                 "action_config": {"command": "echo stress"},
                 "enabled": True,
@@ -29,11 +29,11 @@ def main():
             }
         )
 
-    print("開始寫入資料庫...")
+    print("Writing to the database...")
     with SessionLocal() as db:
         db.execute(insert(Job), jobs_data)
         db.commit()
-    print("寫入完成！")
+    print("Done.")
 
 
 if __name__ == "__main__":

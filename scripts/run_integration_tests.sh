@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../backend" && pwd)"
 
 PG_MAIN=dass-test-pg
 LOCALSTACK=dass-test-localstack
@@ -20,7 +20,7 @@ PG_MAIN_PORT=55432
 LOCALSTACK_PORT=14566
 
 export DASS_DATABASE_URL="postgresql+psycopg://dass:dass@localhost:${PG_MAIN_PORT}/dass_test"
-export DASS_DATABASE_REPLICA_URL="$DASS_DATABASE_URL"
+export DASS_REPLICA_DATABASE_URL="$DASS_DATABASE_URL"
 export DASS_SQS_ENDPOINT_URL="http://localhost:${LOCALSTACK_PORT}"
 export DASS_QUEUE_BACKEND=sqs
 export DASS_QUEUE_NAME=dass-tasks

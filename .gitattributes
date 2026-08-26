@@ -1,10 +1,10 @@
-# 讓 Git 自動判斷，大部分檔案會在 Windows 轉 CRLF，在 Linux 轉 LF
+# Let Git normalise line endings: CRLF in the working tree on Windows, LF in the repo.
 * text=auto
 
-# 強制要求以下檔案永遠使用 LF (Linux 換行符號)，無論是在 Windows 還是 Mac 上開發
-# 因為這些檔案最終都會在 Docker (Linux) 裡面執行
+# These always run inside Linux containers, so they must keep LF regardless of
+# the host they were edited on.
 *.sh text eol=lf
-Dockerfile* text eol=lf
 *.ini text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+Dockerfile* text eol=lf

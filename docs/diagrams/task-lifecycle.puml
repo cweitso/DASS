@@ -1,0 +1,82 @@
+@startuml task-lifecycle
+' One task, end to end — the sequence a change to the worker or scheduler has to respect.
+
+title Task lifecycle — create to result
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam sequenceMessageAlign left
+
+actor Client
+participant "API server" as API
+participant "Scheduler\n(leader)" as SCHED
+database "PostgreSQL" as DB
+queue "SQS" as Q
+participant "Worker" as W
+participant "Job container" as C
+
+== Definition ==
+Client -> API : POST /api/v1/jobs
+API -> API : compile action_config\ninto runtime_spec
+API -> DB : INSERT job
+note right of API
+  No cron -> job_type='normal', runs once, now.
+  With cron -> job_type='scheduled', the
+  scheduler owns it from here.
+end note
+
+== Dispatch (one of three paths) ==
+alt on demand — POST /trigger, or a one-time job being created
+  API -> DB : INSERT task (trigger_type='manual')
+  API -> Q : send to **normal** queue
+else cron — scheduler heap says it is due
+  SCHED -> DB : UPDATE job.next_fire_at
+  SCHED -> DB : INSERT task (trigger_type='scheduled')
+  SCHED -> Q : send to **scheduled** queue
+else dependency — every upstream has succeeded
+  SCHED -> DB : INSERT task (trigger_type='dependency')
+  SCHED -> Q : send to **normal** queue
+end
+
+== Execution ==
+W -> Q : receive (long poll)
+W -> DB : UPDATE tasks SET status='running'\nWHERE id=? AND status='pending'
+alt zero rows changed
+  W -> DB : read current status
+  note right of W
+    Terminal or missing -> delete the message,
+    nobody will process it.
+    Still pending or running -> leave it and let
+    the visibility timeout re-deliver.
+  end note
+else claimed
+  W -> C : run runtime_spec
+  loop every 0.6 x visibility timeout, while running
+    W -> DB : extend locked_until
+    W -> Q : extend message visibility
+  end
+  C --> W : exit code, stdout, stderr
+end
+
+== Result ==
+alt success
+  W -> DB : status='success'
+  W -> Q : delete message
+else failure with retries left
+  W -> DB : status='failed'
+  W -> DB : INSERT task (retry_count + 1)
+  W -> Q : send to **retry** queue
+else retries exhausted
+  W -> DB : status='final_failed'
+end
+
+== Recovery ==
+SCHED -> DB : find running tasks whose locked_until has passed
+SCHED -> DB : reset them to 'pending'
+note right of SCHED
+  No message is re-sent. The heartbeat extends the
+  DB lock and the queue visibility together, so they
+  expire together and the queue re-delivers on its
+  own. Re-sending here would run the task twice.
+end note
+@enduml

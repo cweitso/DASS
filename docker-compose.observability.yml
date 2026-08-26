@@ -90,7 +90,7 @@ services:
       postgres:
         condition: service_healthy
       pgbouncer:
-        condition: service_started # 確保代理大廳開門了
+        condition: service_started
     networks:
       - dass-net
     restart: unless-stopped
@@ -107,7 +107,7 @@ services:
       DASS_AWS_ACCESS_KEY_ID: dass
       DASS_AWS_SECRET_ACCESS_KEY: dass
       DASS_SQS_EXPORTER_INTERVAL: "3"
-      # 佇列名稱跟隨 .env，exporter 才不會在改名後抓舊名稱
+      # Queue names follow .env so the exporter never scrapes a renamed queue.
       DASS_QUEUE_NAME_NORMAL: ${DASS_QUEUE_NAME_NORMAL:-dass-tasks-normal}
       DASS_QUEUE_NAME_SCHEDULED: ${DASS_QUEUE_NAME_SCHEDULED:-dass-tasks-scheduled}
       DASS_QUEUE_NAME_RETRY: ${DASS_QUEUE_NAME_RETRY:-dass-tasks-retry}

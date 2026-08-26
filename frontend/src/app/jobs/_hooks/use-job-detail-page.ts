@@ -9,6 +9,7 @@ import {
 import { useRouter } from "next/navigation"
 
 import { api } from "../../../api/client"
+import { isTaskSettled, refetchWhileActive } from "../../../api/polling"
 import { useToast } from "../../../hooks/use-toast"
 import type { Job } from "../../../types"
 
@@ -25,6 +26,11 @@ export function useJobDetailPage(jobId: string) {
   const tasksQuery = useQuery({
     queryKey: ["job-tasks", jobId],
     queryFn: () => api.listJobTasks(jobId),
+    // Poll while any run is still pending or running, then go quiet.
+    refetchInterval: query =>
+      refetchWhileActive(
+        (query.state.data ?? []).some(task => !isTaskSettled(task))
+      ),
   })
 
   const relatedJobIds = jobQuery.data
