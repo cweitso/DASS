@@ -1,6 +1,9 @@
-# Three worker Deployments — one per queue.
-# Each Deployment is scaled independently by its own ScaledObject (09-keda-scaledobject.yaml).
-# Workers only consume the queue they are assigned to via --queue <name>.
+# One worker Deployment per queue, each scaled independently by its own
+# ScaledObject (09-keda-scaledobject.yaml). A worker consumes only the queue it is
+# given via --queue <name>.
+#
+# Requests are deliberately small: minikube's default two nodes have ~2GB each, and
+# these pods have to leave room for the job pods they create.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -37,10 +40,10 @@ spec:
         resources:
           requests:
             cpu: "100m"
-            memory: "512Mi"
+            memory: "160Mi"
           limits:
-            cpu: "500m"
-            memory: "2Gi"
+            cpu: "400m"
+            memory: "512Mi"
 
 ---
 apiVersion: apps/v1
@@ -78,10 +81,10 @@ spec:
         resources:
           requests:
             cpu: "100m"
-            memory: "512Mi"
+            memory: "160Mi"
           limits:
-            cpu: "500m"
-            memory: "2Gi"
+            cpu: "400m"
+            memory: "512Mi"
 
 ---
 apiVersion: apps/v1
@@ -119,7 +122,7 @@ spec:
         resources:
           requests:
             cpu: "100m"
-            memory: "512Mi"
+            memory: "160Mi"
           limits:
-            cpu: "500m"
-            memory: "2Gi"
+            cpu: "400m"
+            memory: "512Mi"
