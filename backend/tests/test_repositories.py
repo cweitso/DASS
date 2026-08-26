@@ -113,7 +113,7 @@ class TestJobRepository:
         assert job_repo.get(job_id) is None
 
     def test_list_updated_since_only_returns_scheduled_jobs(self, job_repo, db_session):
-        """scheduler 的增量同步只該撈 job_type='scheduled'，normal job 不進排程器。"""
+        """Incremental sync returns only scheduled jobs; one-time jobs stay out."""
         scheduled = _make_job(name="scheduled-job", job_type="scheduled")
         normal = _make_job(name="normal-job", job_type="normal")
 
@@ -170,32 +170,32 @@ class TestTaskRepository:
         assert task_repo.count_running_for_job(job.id) == 1
 
     def test_list_expired_running_edge_cases(self, task_repo, db_session):
-        """orphan 清道夫只能撈到 status=running 且 locked_until < now 的 task。"""
+        """Only running tasks whose lock has already expired count as orphans."""
         job = self._seed_job(db_session)
         now = datetime.now(UTC)
 
-        # 過期 1 秒 → 應抓
+        # Expired one second ago: reclaimable.
         expired = _make_task(
             job.id,
             status="running",
             locked_until=now - timedelta(seconds=1),
             trigger_type="scheduled",
         )
-        # 還有 1 秒才過期 → 不該抓
+        # One second left: not yet.
         alive = _make_task(
             job.id,
             status="running",
             locked_until=now + timedelta(seconds=1),
             trigger_type="scheduled",
         )
-        # 已 success 但鎖時間殘留 → 不該抓
+        # Already succeeded, stale lock: not an orphan.
         finished = _make_task(
             job.id,
             status="success",
             locked_until=now - timedelta(days=1),
             trigger_type="scheduled",
         )
-        # locked_until == now（嚴格 <），不該抓
+        # locked_until == now, and the comparison is strict.
         exact_zero = _make_task(
             job.id,
             status="running",
@@ -211,7 +211,7 @@ class TestTaskRepository:
         assert orphans[0].id == expired.id
 
     def test_mark_failed_clears_lock_and_records_output(self, task_repo, db_session):
-        """final=False：status→failed，locked_by/until 清空，stderr 寫入。"""
+        """final=False marks the task failed, clears the lock, records stderr."""
         job = self._seed_job(db_session)
         task = _make_task(
             job.id,
@@ -233,7 +233,7 @@ class TestTaskRepository:
         assert updated.stderr == "error trace"
 
     def test_mark_failed_final_sets_terminal_status(self, task_repo, db_session):
-        """final=True：status→final_failed，並同樣清空鎖。"""
+        """final=True marks the task final_failed and clears the lock too."""
         job = self._seed_job(db_session)
         task = _make_task(
             job.id,

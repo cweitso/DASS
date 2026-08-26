@@ -42,7 +42,7 @@ class TestSchedulerService:
         queue = MemoryQueueClient()
         job = _job(db_session)
 
-        # 建立一個測試用的連線工廠，綁定到目前的測試資料庫引擎
+        # Session factory bound to the test engine, mirroring SessionLocal.
         factory = sessionmaker(bind=db_session.get_bind())
         service = SchedulerService(factory, queue, queue)
 
@@ -54,27 +54,31 @@ class TestSchedulerService:
         assert len(tasks) == 1
 
     def test_scheduler_dispatch_routes_to_scheduled_queue(self, db_session):
-        """Scheduler 的派發必須落在 scheduled queue，normal queue 應保持空。
-        Worker 端依 normal > scheduled > retry 優先序消費，路由錯了就違反這個設計。
+        """Cron dispatches must land on the scheduled queue, never the normal one.
+
+        The two queues are consumed by separate worker pools; routing a cron
+        dispatch to the normal queue breaks that separation.
         """
         normal_queue = MemoryQueueClient()
         scheduled_queue = MemoryQueueClient()
         _job(db_session)
 
         factory = sessionmaker(bind=db_session.get_bind())
-        # 新的實作中 SchedulerService 只需要傳入 scheduled_queue
+        # Cron dispatch only ever touches the scheduled queue.
         service = SchedulerService(factory, scheduled_queue, scheduled_queue)
         service.sync_jobs()
 
         service.dispatch_due_jobs()
 
-        # normal_queue 沒有傳入，一定是空的。scheduled_queue 會有派發的任務。
+        # The normal queue was never handed to the cron path, so it stays empty.
         assert normal_queue._queue.empty()
         assert scheduled_queue._queue.qsize() == 1
 
     def test_scheduler_ignores_normal_jobs(self, db_session):
-        """job_type='normal' 的 job 即使已到期也不該被 scheduler 派發。
-        手動觸發走 API → normal queue，scheduler 不能重複燒它，否則 task 會雙倍累積。
+        """A one-time job must never be dispatched by the scheduler.
+
+        One-time jobs are fired by the API into the normal queue; dispatching them
+        here as well would run every job twice.
         """
         queue = MemoryQueueClient()
         job = _job(db_session, job_type="normal")
@@ -133,7 +137,7 @@ class TestSchedulerService:
         assert task.status == "pending"
 
     def test_orphan_recovery_does_not_resend_message(self, db_session):
-        """recover_orphans 不該主動重塞 message；SQS visibility 過期會自己 surface。"""
+        """recover_orphans must not re-send: the queue re-delivers on its own."""
         queue = MemoryQueueClient()
         job = _job(db_session)
         task = Task(
@@ -150,24 +154,25 @@ class TestSchedulerService:
         service = SchedulerService(factory, queue, queue)
         service.sync_jobs()
         service.recover_orphans()
-        # MemoryQueueClient 沒 visibility 概念；確認 queue 是空的，沒被偷塞 message
+        # MemoryQueueClient has no visibility timeout, so an empty queue proves
+        # recover_orphans did not enqueue anything.
         assert queue._queue.empty()
 
     def test_trigger_dependent_jobs(self, db_session):
-        """Scheduler 應該能偵測剛成功的 Task，並觸發其相依的下游 Job (downstream_jobs)。"""
+        """A successful task triggers the downstream jobs that depend on it."""
         queue = MemoryQueueClient()
         factory = sessionmaker(bind=db_session.get_bind())
         service = SchedulerService(factory, queue, queue)
 
-        # 1. 建立下游 Job B
+        # Downstream job.
         job_b = _job(db_session, name="Job B")
 
-        # 2. 建立上游 Job A，並把 Job B 加入其下游任務清單
+        # Upstream job, with B wired as its downstream.
         job_a = _job(db_session, name="Job A")
         job_a.downstream_jobs.append(job_b)
         db_session.commit()
 
-        # 3. 模擬 Worker 剛完成 Job A，建立一筆成功的 Task
+        # A worker has just finished A successfully.
         task_a = Task(
             job_id=str(job_a.id),
             status="success",
@@ -178,27 +183,27 @@ class TestSchedulerService:
         db_session.add(task_a)
         db_session.commit()
 
-        # 4. 執行 Scheduler 的相依性檢查邏輯
+        # Run the dependency pass.
         triggered_count = service.trigger_dependent_jobs()
 
-        # 5. 驗證結果
+        # B should have been dispatched exactly once.
         assert triggered_count == 1
 
-        # 驗證 Task A 已經被標記為處理過，避免重複觸發
+        # A's task is marked so the next pass does not re-trigger B.
         db_session.refresh(task_a)
         assert task_a.processed_for_chaining is True
 
-        # 驗證系統有幫 Job B 建立一筆新的 Task
+        # B got a fresh pending task.
         tasks_b = db_session.query(Task).filter(Task.job_id == job_b.id).all()
         assert len(tasks_b) == 1
         assert tasks_b[0].status == "pending"
         assert tasks_b[0].trigger_type == "dependency"
 
-        # 驗證這個新的 Task 有被正確推入 Queue 準備執行
+        # ...and it reached the queue.
         assert queue._queue.qsize() == 1
 
     def test_chaining_propagates_one_level_per_success(self, db_session):
-        """A→B→C：A 成功只觸發 B；要等 B 也成功才觸發 C（一次傳播一層）。"""
+        """A -> B -> C propagates one level per success, not the whole chain."""
         queue = MemoryQueueClient()
         factory = sessionmaker(bind=db_session.get_bind())
         service = SchedulerService(factory, queue, queue)
@@ -215,13 +220,13 @@ class TestSchedulerService:
         db_session.add(task_a)
         db_session.commit()
 
-        # A 成功 → 只觸發 B
+        # A succeeds: only B fires.
         assert service.trigger_dependent_jobs() == 1
         b_tasks = db_session.query(Task).filter(Task.job_id == b.id).all()
         assert len(b_tasks) == 1 and b_tasks[0].trigger_type == "dependency"
         assert db_session.query(Task).filter(Task.job_id == c.id).count() == 0
 
-        # B 也成功 → 才觸發 C
+        # B succeeds too: now C fires.
         b_tasks[0].status = "success"
         b_tasks[0].processed_for_chaining = False
         db_session.commit()
@@ -229,7 +234,7 @@ class TestSchedulerService:
         assert db_session.query(Task).filter(Task.job_id == c.id).count() == 1
 
     def test_chaining_cycle_does_not_loop_forever(self, db_session):
-        """A↔B 互為上下游時，單一成功事件只觸發有限次，不會自我延續成無限迴圈。"""
+        """A mutual A <-> B dependency triggers a bounded number of times."""
         queue = MemoryQueueClient()
         factory = sessionmaker(bind=db_session.get_bind())
         service = SchedulerService(factory, queue, queue)
@@ -244,7 +249,7 @@ class TestSchedulerService:
                             retry_count=0, processed_for_chaining=False))
         db_session.commit()
 
-        # A 成功 → 觸發 B 一次；A 的 task 標記 processed 後不會再被撈
+        # A succeeds: B fires once, and A's task is marked processed.
         assert service.trigger_dependent_jobs() == 1
-        # 沒有新的「未處理的成功 task」→ 0，證明不會無限迴圈
+        # No unprocessed successes remain, so the cycle does not feed itself.
         assert service.trigger_dependent_jobs() == 0

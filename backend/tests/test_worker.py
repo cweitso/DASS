@@ -20,7 +20,7 @@ def _job(db_session, **overrides):
             "action_config",
             {"method": "GET", "url": "https://example.com", "timeout_seconds": 1},
         ),
-        # S4: WorkerService._execute_job 需要有效的 runtime_spec 才能跑 ContainerSpec(**spec)
+        # The worker builds ContainerSpec(**runtime_spec), so it must be valid.
         runtime_spec=overrides.get(
             "runtime_spec",
             {"image": "alpine:3", "command": ["true"], "env": {}, "timeout_seconds": 1},
@@ -168,7 +168,7 @@ class TestWorkerService:
         class SlowExecutor:
             def run(self, *args, **kwargs):
                 from app.services.execution_service import ExecutionResult
-                # 跑 ~2.5s 讓 heartbeat 至少 fire 1 次（interval=1s）
+                # ~2.5s so the 1s heartbeat fires at least once.
                 time.sleep(2.5)
                 return ExecutionResult(success=True, stdout="ok", stderr="")
 
@@ -184,10 +184,10 @@ class TestWorkerService:
         assert all(s == 2 for s in calls), "extend_visibility called with claim_seconds"
 
     def test_claim_fail_running_task_does_not_delete_message(self, db_session):
-        """Task 還在 running（被其他 worker 佔著），claim 失敗時應該回 False 留 message。"""
+        """A task held by another worker: keep the message, return False."""
         queue = MemoryQueueClient()
         job = _job(db_session)
-        # 任務已被 worker-other 佔住，且 lock 尚未過期
+        # Held by worker-other, lock not yet expired.
         task = Task(
             job_id=job.id,
             status="running",
@@ -199,13 +199,13 @@ class TestWorkerService:
         db_session.add(task)
         db_session.commit()
 
-        # claim_seconds=1 → 5 retries × 0.5s 內 status 不變，仍無法 claim
+        # The status never changes, so every claim attempt fails.
         service = WorkerService(db_session, queue, "worker-1", claim_seconds=1)
         result = service.process_task_id(str(task.id))
-        assert result is False, "running task 應該留 message 給 SQS 自然 surface"
+        assert result is False, "a running task keeps its message for re-delivery"
 
     def test_claim_fail_terminal_task_deletes_message(self, db_session):
-        """Task 已 success/final_failed，message 沒人會處理，回 True 刪除。"""
+        """A terminal task: nobody will process the message, so delete it."""
         queue = MemoryQueueClient()
         job = _job(db_session)
         task = Task(
@@ -219,14 +219,14 @@ class TestWorkerService:
 
         service = WorkerService(db_session, queue, "worker-1", claim_seconds=1)
         result = service.process_task_id(str(task.id))
-        assert result is True, "terminal task 的 message 應刪除"
+        assert result is True, "a terminal task's message should be deleted"
 
     def test_claim_fail_missing_task_deletes_message(self, db_session):
-        """Task 不存在於 DB，message 是孤兒，回 True 刪除。"""
+        """A missing task means an orphaned message, so delete it."""
         queue = MemoryQueueClient()
         service = WorkerService(db_session, queue, "worker-1", claim_seconds=1)
         result = service.process_task_id(str(uuid4()))
-        assert result is True, "缺失 task 的 message 應刪除"
+        assert result is True, "an orphaned message should be deleted"
 
     def test_no_heartbeat_when_callback_omitted(self, db_session):
         """When extend_visibility is None, the worker should still run successfully."""
