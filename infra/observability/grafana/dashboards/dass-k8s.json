@@ -247,7 +247,7 @@
     {
       "id": 1,
       "type": "row",
-      "title": "當前 Worker 數量",
+      "title": "Worker pods",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -516,7 +516,7 @@
       "id": 7,
       "type": "stat",
       "title": "HPA Desired",
-      "description": "KEDA 當前計算的目標 pod 數（= ceil(queue_depth / 20)）",
+      "description": "Target replica count KEDA has computed: ceil(queue_depth / 20).",
       "gridPos": {
         "h": 5,
         "w": 4,
@@ -581,7 +581,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Normal — Queue Depth",
-      "description": "Visible = 等待被消費；Not Visible = worker 正在處理中。Visible 下降 = 消費中。",
+      "description": "Visible = waiting to be consumed. Not Visible = currently held by a worker. A falling Visible line means the queue is draining.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -632,7 +632,7 @@
       "id": 12,
       "type": "timeseries",
       "title": "Normal — Workers Ready",
-      "description": "KEDA 根據 visible 訊息數決定 pod 數。公式: ceil(visible / 20)，上限 maxReplicaCount。",
+      "description": "KEDA sizes the Deployment from visible messages: ceil(visible / 20), capped at maxReplicaCount.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -685,7 +685,7 @@
       "id": 13,
       "type": "timeseries",
       "title": "Normal — Active Processing",
-      "description": "Not Visible = 現在正被 worker 消費中的訊息數（= 處理吞吐量代理指標）",
+      "description": "Not Visible = messages currently being processed by a worker, which stands in for throughput.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -885,7 +885,7 @@
           "refId": "A"
         }
       ],
-      "description": "Not Visible = 現在正被 worker 消費中的訊息數（= 處理吞吐量代理指標）"
+      "description": "Not Visible = messages currently being processed by a worker, which stands in for throughput."
     },
     {
       "id": 30,
@@ -903,7 +903,7 @@
       "id": 31,
       "type": "timeseries",
       "title": "Retry — Queue Depth",
-      "description": "任務失敗且 retry_count < max_retries 時才進這個 queue。load_gen max_retries=3 才能看到流量。",
+      "description": "Only failed tasks with retry_count < max_retries reach this queue. Run load_gen with max_retries=3 to see traffic here.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -1046,7 +1046,7 @@
           "refId": "A"
         }
       ],
-      "description": "Not Visible = 現在正被 worker 消費中的訊息數（= 處理吞吐量代理指標）"
+      "description": "Not Visible = messages currently being processed by a worker, which stands in for throughput."
     },
     {
       "id": 40,

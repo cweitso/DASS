@@ -17,7 +17,7 @@
       "type": "stat",
       "title": "Jobs in DB",
       "id": 1,
-      "description": "jobs 表的『全部』job 定義總數 = Normal + Scheduled（見下方 Jobs (definitions) 拆分）。會跟 Normal 數字相同，只是因為目前 Scheduled = 0；一旦有排程 job，這個總數就會比 Normal 大。",
+      "description": "Every job definition in the jobs table: Normal + Scheduled (broken out in Jobs (definitions) below). It matches the Normal figure only while Scheduled is 0.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -79,7 +79,7 @@
           }
         }
       },
-      "description": "排程器目前手上、還沒到觸發時間的 job 數：enabled 的 scheduled job 中 next_fire_at >= now（heap 裡已武裝、等著被觸發的）。逾期未派發（next_fire_at < now）與 on-demand/normal job 都排除。"
+      "description": "Jobs armed in the scheduler: enabled cron jobs whose next_fire_at is still in the future. Overdue jobs (next_fire_at < now) and one-time jobs are excluded."
     },
     {
       "type": "stat",
@@ -246,7 +246,7 @@
       "type": "stat",
       "title": "Jobs (definitions)",
       "id": 110,
-      "description": "JOB = 工作定義(在 jobs 表)。normal=即時/手動(無 cron);scheduled=有 cron,由排程器管。Normal + Scheduled 相加 = 上方『Jobs in DB』總數。(Scheduled 中『還沒到點、armed』的數量見上方『Scheduler DB jobs (next ≥ now)』。)",
+      "description": "A job is a definition in the jobs table. Normal = one-time, run on demand, no cron. Scheduled = has a cron and is owned by the scheduler. The two add up to Jobs in DB above.",
       "gridPos": {
         "x": 0,
         "y": 5,
@@ -298,7 +298,7 @@
       "type": "stat",
       "title": "Task runs (executions)",
       "id": 111,
-      "description": "TASK run 的『來源』:Trigger-now=在 scheduled job 上按 trigger-now(manual on scheduled);Scheduler-dispatched=排程器自動派發。(成功/失敗/重試看下面 Task outcomes。)",
+      "description": "Where each run came from. Trigger-now = a cron job someone ran by hand. Scheduler-dispatched = the scheduler firing it on schedule. Outcomes are in Task outcomes below.",
       "gridPos": {
         "x": 8,
         "y": 5,
@@ -362,7 +362,7 @@
       "type": "stat",
       "title": "Task outcomes (cumulative)",
       "id": 112,
-      "description": "一個失敗 job 的鏈:第1次失敗 → 重試… → 重試用完則放棄(final_failed)。\n• Enqueued = 總共派出幾次執行。• Succeeded = 成功幾次。\n• Failed runs (incl. retries) = 每一次失敗的『執行』,會被中途重試灌水 → 比真正失敗的多。\n• Retries (re-runs) = 其中是『重跑』的次數(retry_count>0)。\n• Final failures (gave up) = 重試用完仍失敗 → 這才是『真正徹底失敗的數量』。\n關係:Failed runs = 第1次就失敗 + 失敗的重試;Final failures ⊆ Failed runs。",
+      "description": "The life of a failing job: first failure, then retries, then giving up (final_failed).\n- Enqueued: runs dispatched in total.\n- Succeeded: runs that finished successfully.\n- Failed runs (incl. retries): every failed attempt, so retries inflate it above the number of jobs that truly failed.\n- Retries (re-runs): how many of those attempts were re-runs (retry_count > 0).\n- Final failures (gave up): retries exhausted and still failing, which is the real failure count.\nFailed runs = first-attempt failures + failed retries; final failures are a subset of failed runs.",
       "gridPos": {
         "x": 0,
         "y": 12,
@@ -537,7 +537,7 @@
       "type": "timeseries",
       "title": "Tasks waiting (pending, by queue)",
       "id": 10,
-      "description": "目前『等待中』的 task 確切數量（DB status='pending'），依實際路由的佇列分桶（normal/retry/scheduled）。取代原本的 SQS visible『積壓』gauge — 因 task 在一個 scrape interval 內就被消化掉，SQS gauge 幾乎永遠 0。閒置時三條線都會在 0（buckets 補 0），有負載時才會抬升。",
+      "description": "Tasks waiting to run (status='pending'), bucketed by the queue they were routed to. Counted from the database rather than SQS, because a task is usually consumed within one scrape interval and the SQS gauge reads zero. All three lines sit at 0 while idle.",
       "gridPos": {
         "x": 0,
         "y": 35,
@@ -580,7 +580,7 @@
       "type": "timeseries",
       "title": "Tasks in-flight (running, by queue)",
       "id": 11,
-      "description": "目前『執行中』的 task 確切數量（DB status='running'，已被 worker claim），依實際路由的佇列分桶（normal/retry/scheduled）。取代原本的 SQS in-flight gauge。閒置時三條線都會在 0（buckets 補 0），有負載時才會抬升。",
+      "description": "Tasks a worker has claimed and is running (status='running'), bucketed by the queue they were routed to. Replaces the SQS in-flight gauge. All three lines sit at 0 while idle.",
       "gridPos": {
         "x": 12,
         "y": 35,
