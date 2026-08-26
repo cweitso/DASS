@@ -126,10 +126,10 @@ docker build -t dass-worker:local    -f backend/Dockerfile.worker    backend/
 
 echo ""
 echo "=== [5/8] Loading images into Minikube ==="
-minikube image load dass-api:local       --overwrite=true &
-minikube image load dass-scheduler:local --overwrite=true &
-minikube image load dass-worker:local    --overwrite=true &
-wait
+for image in dass-api:local dass-scheduler:local dass-worker:local; do
+  load_image_into_minikube "$image"
+done
+load_job_images_into_minikube
 minikube image ls | grep "dass-" || true
 
 echo ""

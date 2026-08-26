@@ -85,12 +85,40 @@ done
 INNER
   chmod +x "$KSM_SCRIPT"
   nohup "$KSM_SCRIPT" > "$KSM_LOG" 2>&1 &
-  sleep 4
-  if curl -s --max-time 3 "http://localhost:${KSM_PORT}/metrics" | head -1 | grep -q "HELP"; then
-    echo "kube-state-metrics port-forward is up on :${KSM_PORT}"
-  else
-    echo "WARNING: kube-state-metrics port-forward is not responding yet"
-  fi
+
+  # Poll rather than sleeping once: the Service is usually seconds old at this
+  # point, and a single early check reported a failure that was not real.
+  for _ in $(seq 1 15); do
+    if curl -s --max-time 3 "http://localhost:${KSM_PORT}/metrics" | head -1 | grep -q "HELP"; then
+      echo "kube-state-metrics port-forward is up on :${KSM_PORT}"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "WARNING: kube-state-metrics is not responding on :${KSM_PORT} (see $KSM_LOG)"
+}
+
+# Push a host image into every Minikube node.
+#
+# Not `minikube image load`: when the tag already exists on a node it leaves the
+# old image in place even with --overwrite=true, so re-running the mode 2 script
+# after a code change silently redeploys the previous build. Piping a `docker
+# save` into each node's daemon replaces the tag every time.
+load_image_into_minikube() {
+  local image="$1" node
+  for node in $(minikube node list 2>/dev/null | awk '{print $1}'); do
+    docker save "$image" | minikube ssh -n "$node" --native-ssh=false -- docker load >/dev/null 2>&1 ||
+      echo "WARNING: could not load $image into node $node"
+  done
+}
+
+# Job containers run inside the cluster in mode 2, so their images have to be on
+# the nodes as well as on the host.
+load_job_images_into_minikube() {
+  echo "Loading job runner images into Minikube..."
+  for image in "${JOB_IMAGES[@]}"; do
+    load_image_into_minikube "$image"
+  done
 }
 
 stop_ksm_port_forward() {
