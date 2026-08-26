@@ -169,36 +169,6 @@ class TestTaskRepository:
         db_session.commit()
         assert task_repo.count_running_for_job(job.id) == 1
 
-    def test_claim_pending_success(self, task_repo, db_session):
-        """pending task 被 worker 原子搶單後，狀態變 running 且 locked_by 寫入。"""
-        job = self._seed_job(db_session)
-        task = task_repo.create(_make_task(job.id, trigger_type="scheduled"))
-
-        locked_until = datetime.now(UTC) + timedelta(minutes=5)
-        claimed = task_repo.claim_pending(str(task.id), "worker-999", locked_until)
-
-        assert claimed is not None
-        assert claimed.status == "running"
-        assert claimed.locked_by == "worker-999"
-
-    def test_claim_pending_fails_when_already_claimed(self, task_repo, db_session):
-        """task 已經是 running 時，第二個 worker 搶不到，應回 None。"""
-        job = self._seed_job(db_session)
-        task = _make_task(
-            job.id,
-            status="running",
-            locked_by="worker-111",
-            trigger_type="scheduled",
-        )
-        db_session.add(task)
-        db_session.commit()
-        db_session.refresh(task)
-
-        locked_until = datetime.now(UTC) + timedelta(minutes=5)
-        claimed = task_repo.claim_pending(str(task.id), "worker-999", locked_until)
-
-        assert claimed is None
-
     def test_list_expired_running_edge_cases(self, task_repo, db_session):
         """orphan 清道夫只能撈到 status=running 且 locked_until < now 的 task。"""
         job = self._seed_job(db_session)

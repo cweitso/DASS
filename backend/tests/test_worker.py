@@ -49,6 +49,11 @@ class TestWorkerService:
         claimed = service.claim_task(str(task.id))
         assert claimed is not None
         assert claimed.status == "running"
+        assert claimed.locked_by == "worker-1"
+        assert claimed.locked_until is not None
+
+        # A second worker must not be able to claim the same task.
+        assert WorkerService(db_session, queue, "worker-2").claim_task(str(task.id)) is None
 
     def test_worker_executes_http_action(self, db_session):
         """Worker should execute HTTP action and mark task as success."""
@@ -133,19 +138,23 @@ class TestWorkerService:
         assert updated.stderr == "Job not found"
 
     def test_heartbeat_extends_visibility_while_running(self, db_session, monkeypatch):
-        """While the executor is running, the heartbeat thread should call extend_visibility."""
+        """While the executor runs, the heartbeat should keep calling extend_visibility."""
         import time
         from contextlib import contextmanager
 
-        # 把 worker_service.SessionLocal mock 成 no-op，避免 heartbeat thread 撞到測試環境沒 postgres
-        @contextmanager
-        def fake_session():
-            class _S:
-                info: dict = {}
-                def execute(self, *a, **kw): pass
-                def commit(self): pass
-            yield _S()
-        monkeypatch.setattr("app.services.worker_service.SessionLocal", fake_session)
+        # Stub the heartbeat engine: unit tests have no PostgreSQL to extend a lock on.
+        class _FakeHeartbeatEngine:
+            @contextmanager
+            def begin(self):
+                class _Conn:
+                    def execute(self, *args, **kwargs):
+                        return None
+
+                yield _Conn()
+
+        monkeypatch.setattr(
+            "app.services.worker_service.heartbeat_engine", _FakeHeartbeatEngine()
+        )
 
         queue = MemoryQueueClient()
         job = _job(db_session)
