@@ -1,3 +1,8 @@
+# Development overlay: mounts backend source for hot reload and publishes the
+# ports the host needs. The frontend deliberately stays on its production build —
+# Next.js dev mode inside a container needs more inotify watches than most hosts
+# allow by default. Run `npm run dev` on the host for frontend hot reload.
+
 services:
   api-server:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -30,15 +35,5 @@ services:
       DASS_LOG_LEVEL: DEBUG
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        DASS_BACKEND_URL: ${DASS_BACKEND_URL:-http://api-server:8000}
-      target: dev
-    command: npm run dev -- --hostname 0.0.0.0 --port 3000
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
     ports:
       - "3000:3000"
