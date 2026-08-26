@@ -44,22 +44,25 @@ class Job(Base):
 
     id: Mapped[str] = mapped_column(GUID(), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "scheduled" (cron-driven) or "normal" (one-time). Indexed because the
+    # scheduler filters on it every sync.
     job_type: Mapped[str] = mapped_column(
         String(32), nullable=False, default="scheduled", index=True
-    )  # 任務類型，預設為定時任務，並建立索引 (B+ 樹)
-    cron_expression: Mapped[str | None] = mapped_column(
-        String(255), nullable=True
-    )  # 即時任務不需要 Cron，所以改為允許為空 (nullable=True)
+    )
+    # Null for one-time jobs, which have no schedule.
+    cron_expression: Mapped[str | None] = mapped_column(String(255), nullable=True)
     action_type: Mapped[str] = mapped_column(String(32), nullable=False)
     action_config: Mapped[dict] = mapped_column(JSONBCompat(), nullable=False)
-    # S4: ContainerSpec 預先翻好的字典；JobService 在 create/update 時填入，worker 直接吃。
+    # Pre-translated ContainerSpec. JobService fills it on create/update so the
+    # worker can execute a job without re-interpreting action_config.
     runtime_spec: Mapped[dict | None] = mapped_column(JSONBCompat(), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     concurrency_policy: Mapped[str] = mapped_column(String(32), nullable=False)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Null for one-time jobs. Indexed for the scheduler's ordering by due time.
     next_fire_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
-    )  # 即時任務不需要下次執行時間，改為允許為空，並建立時間排序索引 (B+ 樹)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -72,7 +75,7 @@ class Job(Base):
 
     tasks = relationship("Task", back_populates="job", cascade="all, delete-orphan")
 
-    # 定義「下游任務」 (這個 Job 跑完後，可能要觸發誰)
+    # Jobs this one may trigger once it succeeds.
     downstream_jobs = relationship(
         "Job",
         secondary=job_dependencies,
@@ -80,7 +83,7 @@ class Job(Base):
         secondaryjoin="Job.id == job_dependencies.c.downstream_job_id",
         back_populates="upstream_jobs",
     )
-    # 定義「上游任務」 (這個 Job 要等哪些任務跑完)
+    # Jobs that must all succeed before this one runs.
     upstream_jobs = relationship(
         "Job",
         secondary=job_dependencies,
