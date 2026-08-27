@@ -552,7 +552,7 @@ Start the observability overlay first so you can watch queue depth, worker throu
 and database pressure while the test runs.
 
 ```bash
-./infra/load-test.sh 400
+./infra/load-test.sh 400      # 400 jobs -> 400 task runs
 ```
 
 That wraps `scripts/load_gen.py`, which drives the full HTTP → API → database → queue
@@ -561,16 +561,23 @@ are real. For finer control:
 
 ```bash
 cd backend
-uv run python ../scripts/load_gen.py --count 1000 --concurrency 64 --trigger
+uv run python ../scripts/load_gen.py --count 1000 --concurrency 64
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--count N` | jobs to create (default 1000) |
 | `--concurrency N` | parallel in-flight HTTP requests (default 32) |
-| `--trigger` | after creating, fire each job once via `/trigger` |
+| `--trigger` | run every job a **second** time via `/trigger`, doubling the task count |
 | `--api URL` | API base URL (default `https://dass.localhost:8443`) |
 | `--insecure` | skip TLS verification |
+
+> **N jobs means N task runs, not N + something.** These jobs carry no cron, so each is
+> created as a one-time job and `POST /jobs` dispatches it in the same request — the
+> job is already running before any trigger call. `--trigger` therefore adds a *second*
+> run per job. The generator prints the number of runs it expects before it starts and
+> the number it produced when it finishes, so the figure on the dashboard should never
+> be a surprise.
 
 Watch the effect on **DASS · Overview**, or in mode 2 on **DASS · Kubernetes**
 alongside `watch -n3 'kubectl get pods -n dass | grep worker'`. The other generators

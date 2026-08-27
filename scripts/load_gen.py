@@ -134,7 +134,11 @@ async def amain() -> int:
     parser.add_argument("--api", default="https://dass.localhost:8443", help="API base URL")
     parser.add_argument("--ca-cert", default=str(DEFAULT_CA_CERT), help="CA certificate bundle to trust")
     parser.add_argument("--insecure", action="store_true", help="disable TLS verification")
-    parser.add_argument("--trigger", action="store_true", help="after creation, fire each job once via /trigger")
+    parser.add_argument(
+        "--trigger",
+        action="store_true",
+        help="fire each job a SECOND time via /trigger (creation already runs it once)",
+    )
     parser.add_argument("--timeout", type=float, default=15.0, help="per-request timeout seconds")
     parser.add_argument("--prefix", default=None, help="job name prefix (default: load-<timestamp>)")
     args = parser.parse_args()
@@ -143,9 +147,22 @@ async def amain() -> int:
         print(f"⚠ {args.count:,} jobs is extreme — make sure your DB can hold this many rows.")
 
     prefix = args.prefix or f"load-{int(time.time())}"
-    print(f"target={args.api}  count={args.count:,}  concurrency={args.concurrency}  trigger={args.trigger}")
+    runs_per_job = 2 if args.trigger else 1
+    expected_runs = args.count * runs_per_job
+
+    print(f"target={args.api}  jobs={args.count:,}  concurrency={args.concurrency}")
     print(f"prefix={prefix}")
-    print(f"watch http://localhost:3001/d/dass-overview while this runs\n")
+    # These jobs carry no cron, so each one is created as a one-time job and
+    # POST /jobs dispatches it immediately. Adding --trigger runs it a second
+    # time, which is why the task count comes out at twice the job count.
+    if args.trigger:
+        print(
+            f"expected task runs={expected_runs:,}  "
+            f"({args.count:,} dispatched on create + {args.count:,} from /trigger)"
+        )
+    else:
+        print(f"expected task runs={expected_runs:,}  (each job runs once, on create)")
+    print("watch http://localhost:3001/d/dass-overview while this runs\n")
 
     limits = httpx.Limits(
         max_connections=args.concurrency * 2,
@@ -172,6 +189,11 @@ async def amain() -> int:
             print()
             await bulk_trigger(client, args.api, ids, args.concurrency)
 
+    print()
+    print(
+        f"created {len(ids):,} jobs -> {len(ids) * runs_per_job:,} task runs "
+        f"(prefix {prefix})"
+    )
     return 0
 
 
